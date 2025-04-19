@@ -29,6 +29,10 @@ jobs:
         with:  # with 區塊用於設置動作的輸入參數
           bun-version: latest  # 使用最新版的 Bun
 
+      # 確保 just 文件有執行權限
+      - name: Ensure just is executable
+        run: chmod +x ./just
+
       # 從標籤獲取版本號
       - name: Get version from tag
         id: get_version  # 步驟的 ID，用於在後續步驟中引用此步驟的輸出
