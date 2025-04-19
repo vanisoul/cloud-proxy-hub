@@ -29,9 +29,13 @@ jobs:
         with:  # with 區塊用於設置動作的輸入參數
           bun-version: latest  # 使用最新版的 Bun
 
-      # 確保 just 文件有執行權限
-      - name: Ensure just is executable
-        run: chmod +x ./just
+      # 安裝 just CLI
+      - name: Install just CLI
+        run: |
+          sudo apt update
+          sudo apt install -y just
+          # 確認 just 已安裝
+          just --version
 
       # 從標籤獲取版本號
       - name: Get version from tag
@@ -59,11 +63,11 @@ jobs:
 
       # CI 階段: 安裝依賴
       - name: Install dependencies
-        run: ./just install  # 執行 ./just install 命令
+        run: just install  # 執行 just install 命令
 
       # CI 階段: 運行測試
       - name: Run tests
-        run: ./just test  # 執行 ./just test 命令
+        run: just test  # 執行 just test 命令
 
       # CI 階段: 構建 Docker 映像檔
       - name: Build Docker image
@@ -71,7 +75,7 @@ jobs:
         # steps.get_version.outputs.is_release 引用了 id 為 get_version 的步驟中設置的 is_release 輸出
         # == 'true' 檢查該值是否等於字符串 'true'
         if: steps.get_version.outputs.is_release == 'true'
-        run: ./just build ${{ env.VERSION }}  # 使用 ${{ env.VERSION }} 引用之前設置的環境變數
+        run: just build ${{ env.VERSION }}  # 使用 ${{ env.VERSION }} 引用之前設置的環境變數
 
       # CD 階段: 推送 Docker 映像檔到 Docker Hub (僅在 tag 為 v*.*.* 時執行)
       - name: Push Docker image
@@ -80,4 +84,4 @@ jobs:
           # 將 secrets 設置為環境變數，以便在 shell 命令中使用
           DOCKER_HUB_ACCOUNT: ${{ secrets.DOCKER_HUB_ACCOUNT }}
           DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
-        run: ./just push ${{ env.VERSION }}  # 執行 ./just push 命令，傳入版本號
+        run: just push ${{ env.VERSION }}  # 執行 just push 命令，傳入版本號
