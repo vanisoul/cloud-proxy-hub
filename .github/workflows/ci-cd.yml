@@ -40,11 +40,11 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/v}  # 使用 bash 字符串操作移除 "refs/tags/v" 前綴
 
             # $GITHUB_ENV 是 GitHub Actions 的特殊文件，用於在步驟之間設置環境變數
-            # 格式為 "變數名=值"，寫入此文件的變數可在後續步驟中通過 ${{ env.變數名 }} 訪問
+            # 格式為 "變數名=值"，寫入此文件的變數可在後續步驟中通過 env.變數名 語法訪問
             echo "VERSION=$VERSION" >> $GITHUB_ENV
 
             # $GITHUB_OUTPUT 是 GitHub Actions 的特殊文件，用於設置步驟的輸出
-            # 格式為 "變數名=值"，寫入此文件的變數可在後續步驟中通過 ${{ steps.步驟ID.outputs.變數名 }} 訪問
+            # 格式為 "變數名=值"，寫入此文件的變數可在後續步驟中通過 steps.步驟ID.outputs.變數名 語法訪問
             echo "version=$VERSION" >> $GITHUB_OUTPUT
 
             # 設置一個標誌，表示這是一個發布版本
