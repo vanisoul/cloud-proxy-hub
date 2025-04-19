@@ -1,0 +1,79 @@
+name: CI/CD Pipeline
+
+# 定義何時觸發此工作流程
+# on 區塊定義了工作流程的觸發條件
+on:
+  push:
+    branches: [ main, master ]  # 當推送到 main 或 master 分支時觸發
+    tags:
+      - 'v*.*.*'  # 當推送符合 vX.X.X 格式的標籤時觸發
+  pull_request:
+    branches: [ main, master ]  # 當向 main 或 master 分支發起 PR 時觸發
+
+# jobs 區塊定義了工作流程中的所有任務
+jobs:
+  # ci-cd 是任務的名稱，可以自定義
+  ci-cd:
+    name: CI/CD Pipeline  # 任務的顯示名稱
+    runs-on: ubuntu-latest  # 指定運行環境，這裡使用最新版的 Ubuntu
+
+    # steps 區塊定義了任務中的所有步驟，按順序執行
+    steps:
+      # 檢出代碼，使用官方的 actions/checkout 動作
+      - name: Checkout code  # 步驟的顯示名稱
+        uses: actions/checkout@v3  # 使用的動作，@v3 表示版本
+
+      # 設置 Bun 環境，使用官方的 oven-sh/setup-bun 動作
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:  # with 區塊用於設置動作的輸入參數
+          bun-version: latest  # 使用最新版的 Bun
+
+      # 從標籤獲取版本號
+      - name: Get version from tag
+        id: get_version  # 步驟的 ID，用於在後續步驟中引用此步驟的輸出
+        run: |  # run 區塊用於執行 shell 命令，| 表示多行命令
+          # $GITHUB_REF 是 GitHub Actions 的環境變數，包含觸發工作流程的引用名稱
+          # 例如：refs/heads/main 或 refs/tags/v1.0.0
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            # 如果是標籤觸發，從標籤名稱中提取版本號
+            VERSION=${GITHUB_REF#refs/tags/v}  # 使用 bash 字符串操作移除 "refs/tags/v" 前綴
+
+            # $GITHUB_ENV 是 GitHub Actions 的特殊文件，用於在步驟之間設置環境變數
+            # 格式為 "變數名=值"，寫入此文件的變數可在後續步驟中通過 ${{ env.變數名 }} 訪問
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+            # $GITHUB_OUTPUT 是 GitHub Actions 的特殊文件，用於設置步驟的輸出
+            # 格式為 "變數名=值"，寫入此文件的變數可在後續步驟中通過 ${{ steps.步驟ID.outputs.變數名 }} 訪問
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+            # 設置一個標誌，表示這是一個發布版本
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      # CI 階段: 安裝依賴
+      - name: Install dependencies
+        run: ./just install  # 執行 ./just install 命令
+
+      # CI 階段: 運行測試
+      - name: Run tests
+        run: ./just test  # 執行 ./just test 命令
+
+      # CI 階段: 構建 Docker 映像檔
+      - name: Build Docker image
+        # if 條件控制步驟是否執行
+        # steps.get_version.outputs.is_release 引用了 id 為 get_version 的步驟中設置的 is_release 輸出
+        # == 'true' 檢查該值是否等於字符串 'true'
+        if: steps.get_version.outputs.is_release == 'true'
+        run: ./just build ${{ env.VERSION }}  # 使用 ${{ env.VERSION }} 引用之前設置的環境變數
+
+      # CD 階段: 推送 Docker 映像檔到 Docker Hub (僅在 tag 為 v*.*.* 時執行)
+      - name: Push Docker image
+        if: steps.get_version.outputs.is_release == 'true'  # 同樣只在發布版本時執行
+        env:  # env 區塊用於設置步驟的環境變數
+          # 將 secrets 設置為環境變數，以便在 shell 命令中使用
+          DOCKER_HUB_ACCOUNT: ${{ secrets.DOCKER_HUB_ACCOUNT }}
+          DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
+        run: ./just push ${{ env.VERSION }}  # 執行 ./just push 命令，傳入版本號
