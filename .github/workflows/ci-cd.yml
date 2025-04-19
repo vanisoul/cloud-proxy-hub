@@ -76,17 +76,12 @@ jobs:
         # == 'true' 檢查該值是否等於字符串 'true'
         if: steps.get_version.outputs.is_release == 'true'
         run: |
-          echo "使用 Docker Hub 賬號: $DOCKER_HUB_ACCOUNT"
-          DOCKER_HUB_ACCOUNT=$DOCKER_HUB_ACCOUNT just build ${{ env.VERSION }}  # 使用 ${{ env.VERSION }} 引用之前設置的環境變數
+          # 在命令行中直接設置環境變數
+          DOCKER_HUB_ACCOUNT="${{ secrets.DOCKER_HUB_ACCOUNT }}" just build ${{ env.VERSION }}
 
       # CD 階段: 推送 Docker 映像檔到 Docker Hub (僅在 tag 為 v*.*.* 時執行)
       - name: Push Docker image
         if: steps.get_version.outputs.is_release == 'true'  # 同樣只在發布版本時執行
-        env:  # env 區塊用於設置步驟的環境變數
-          # 將 secrets 設置為環境變數，以便在 shell 命令中使用
-          DOCKER_HUB_ACCOUNT: ${{ secrets.DOCKER_HUB_ACCOUNT }}
-          DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
-        # 明確在命令行中傳遞環境變數
         run: |
-          echo "使用 Docker Hub 賬號: $DOCKER_HUB_ACCOUNT"
-          DOCKER_HUB_ACCOUNT=$DOCKER_HUB_ACCOUNT DOCKER_HUB_TOKEN=$DOCKER_HUB_TOKEN just push ${{ env.VERSION }}
+          # 在命令行中直接設置環境變數
+          DOCKER_HUB_ACCOUNT="${{ secrets.DOCKER_HUB_ACCOUNT }}" DOCKER_HUB_TOKEN="${{ secrets.DOCKER_HUB_TOKEN }}" just push ${{ env.VERSION }}
