@@ -272,6 +272,11 @@ export const CronJob = {
    * 強制清理時間
    */
   forceCronTime: Bun.env.FORCE_CLEAR_TIME ?? "0 4 * * *",
+
+  /**
+   * 強制清理時區
+   */
+  timeZone: Bun.env.FORCE_CLEAR_TIMEZONE ?? "Asia/Taipei",
 };
 
 /**
@@ -420,6 +425,7 @@ export const isProd = Common.isProd;
 export const checkHeaders = Proxy.checkHeaders;
 export const enableForceClear = CronJob.enableForceClear;
 export const forceCronTime = CronJob.forceCronTime;
+export const forceClearTimeZone = CronJob.timeZone;
 export const diskSize = AliyunECS.diskSize;
 export const diskCategory = AliyunECS.diskCategory;
 export const imageId = AliyunECS.imageId;
@@ -516,6 +522,7 @@ export function logAllEnvironmentVariables(): void {
   logger.info("【定時任務相關環境變數】");
   logger.info(`啟用強制清理: ${CronJob.enableForceClear}`);
   logger.info(`強制清理時間: ${CronJob.forceCronTime}`);
+  logger.info(`強制清理時區: ${CronJob.timeZone}`);
 
   // Docker Registry 登錄相關環境變數
   logger.info("【Docker Registry 登錄相關環境變數】");

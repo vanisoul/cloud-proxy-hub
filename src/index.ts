@@ -1,27 +1,28 @@
+import { CronTime } from "cron";
 import { Elysia, t } from "elysia";
 import * as ipTools from "ip";
-import { CronTime } from "cron";
 
-import { swagger } from "@elysiajs/swagger";
 import { createLogger } from "@/utils/logger";
+import { swagger } from "@elysiajs/swagger";
 
+import { clearInstance } from "@/service/clear-instance";
 import { createInstance } from "@/service/create-instance";
-import { startInstance } from "@/service/start-instance";
 import { getInstanceIp } from "@/service/get-instance-ip";
 import { installDocker } from "@/service/install-docker";
 import { installSocks } from "@/service/install-sock5";
 import { installVpn } from "@/service/install-vpn";
-import { clearInstance } from "@/service/clear-instance";
 import { isReady } from "@/service/instance-ready";
 import { generatePACFile } from "@/service/pac-file";
+import { startInstance } from "@/service/start-instance";
 
-import { sqliteDB } from "@/sqlite/index";
 import { aliyunECS } from "@/aliyun/index";
 import { clearInstanceJob, forceClearJob } from "@/cron-tab/index";
+import { sqliteDB } from "@/sqlite/index";
 
 import {
   checkHeaders,
   enableForceClear,
+  forceClearTimeZone,
   forceCronTime,
   getProxyTarget,
   getVersion,
@@ -331,8 +332,8 @@ logger.info("啟動定時清理任務");
 clearInstanceJob.start();
 
 if (enableForceClear) {
-  logger.info("啟動強制清理任務", { cronTime: forceCronTime });
-  forceClearJob.cronTime = new CronTime(forceCronTime);
+  logger.info("啟動強制清理任務", { cronTime: forceCronTime, timeZone: forceClearTimeZone });
+  forceClearJob.cronTime = new CronTime(forceCronTime, forceClearTimeZone);
   forceClearJob.start();
 }
 
