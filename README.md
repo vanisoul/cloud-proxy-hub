@@ -90,6 +90,7 @@
 - `ENABLE_FORCE_CLEAR`: 是否啟動每日強制清除實體，預設為 "false"
 - `FORCE_CLEAR_TIME`: 每日強制清除實體時間，使用 CronTab 格式，當
   `ENABLE_FORCE_CLEAR` 啟動才有作用，預設為 "0 4 * * *"
+- `FORCE_CLEAR_TIMEZONE`: 強制清除實體的時區設定，預設為 "Asia/Taipei"
 
 ### 安裝步驟設定
 
@@ -104,6 +105,11 @@
 ### 資料庫設定
 
 - `DATABASE_URL`: 資料庫連接 URL，預設為 "file:/tmp/aliyundb/db.sqlite"
+
+### CI/CD 配置
+
+- `DOCKER_HUB_ACCOUNT`: Docker Hub 帳號，用於 CI/CD 流程中的 Docker 映像推送
+- `DOCKER_HUB_TOKEN`: Docker Hub 訪問令牌，用於 CI/CD 流程中的身份驗證
 
 ## 安裝依賴
 
