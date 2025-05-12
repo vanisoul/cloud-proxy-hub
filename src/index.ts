@@ -129,7 +129,7 @@ async function create() {
 
 // 創建 API 認證中間件
 const authMiddleware = new Elysia()
-  .onBeforeHandle(({ query, path }) => {
+  .onBeforeHandle({ as: "global" }, ({ query, path }) => {
     // 排除檢查列表
     const excludeList = ["/swagger/json"];
     if (excludeList.includes(path)) {
@@ -190,9 +190,9 @@ const instanceManagementRoutes = new Elysia()
     const result = await clearInstance();
     if (result === undefined) {
       return "no instance need delete";
-    } else {
-      return "instance deleted: " + result.join(", ");
     }
+    return `instance deleted: ${result.join(", ")}`;
+
   }, {
     query: queryStringSchema,
   });
