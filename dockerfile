@@ -8,8 +8,7 @@
 ARG VERSION=0.0.0
 
 # 使用 Node.js 18.17.1 作為基礎映像檔
-FROM node:22.11.0-slim
-
+FROM node:24.15.0-trixie-slim
 # 將 ARG 的版本抓進 image 中
 ARG VERSION
 ENV VERSION=${VERSION}
