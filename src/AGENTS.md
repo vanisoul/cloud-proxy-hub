@@ -2,21 +2,21 @@
 
 ## OVERVIEW
 
-`src/` contains the new Terraform platform only: API/UI composition, filesystem repositories, Terraform runner, provider catalog defaults, domain contracts, and redaction-aware logging.
+`src/` contains the Terraform platform only: provider-scoped API/UI composition, filesystem repositories, Terraform runner, provider catalog defaults, domain contracts, and redaction-aware logging.
 
 ## WHERE TO LOOK
 
 | Task | Location | Notes |
 |------|----------|-------|
 | Add/change API | `index.ts` | Keep mutation routes non-GET and admin-auth protected. |
-| Change storage layout | `storage.ts` | Maintain no-DB `/config` and `/data` contracts. |
-| Change Terraform behavior | `terraform.ts` | Keep saved artifacts under run directory and redact secrets. |
+| Change storage layout | `storage.ts` | Maintain no-DB `/config/keys`, `/config/templates`, `/config/apis`, and `/data/apis` contracts. |
+| Change Terraform behavior | `terraform.ts` | Resolve API -> selected key -> selected template, keep saved artifacts under run directory and redact secrets. |
 | Change provider metadata | `config.ts` | Provider type metadata, not business workflow logic. |
-| Change schemas | `types.ts` | Keep workspace/run/state/credential concepts separate. |
+| Change schemas | `types.ts` | Keep provider keys, templates, published APIs, and runs separate. |
 
 ## CONVENTIONS
 
 - Internal imports use `@/...`.
-- API responses must expose credential env key names only, never credential values.
+- API responses must expose provider key env names only, never key values.
 - Template content must stay server-side allowlisted.
-- Terraform process env injection is the credential boundary.
+- Terraform process env injection is the only boundary where selected key values become runtime env.

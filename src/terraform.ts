@@ -3,35 +3,61 @@ import { dirname, join } from "node:path";
 
 import { appConfig } from "@/config";
 import { PlatformStore } from "@/storage";
-import type { ApiPublication, TerraformAction, TerraformRun } from "@/types";
+import type { ApiPublication, DeploymentAction, TerraformRun } from "@/types";
 
 type RunInput = {
-  action: TerraformAction;
   vars: Record<string, string>;
 };
 
 export class TerraformService {
   constructor(private readonly store: PlatformStore) {}
 
-  async testProviderInstance(providerInstanceId: string) {
-    const instance = await this.store.getProviderInstance(providerInstanceId);
-    const providerType = await this.store.getProviderType(instance.providerTypeId);
-    const credential = await this.store.getCredential(instance.credentialId);
-    const missing = providerType.requiredEnv.filter((name) => !credential.env[name]);
+  async testKey(providerTypeId: string, keyId: string) {
+    const providerType = await this.store.getProviderType(providerTypeId);
+    const key = await this.store.getKey(providerTypeId, keyId);
+    const missing = providerType.requiredEnv.filter((name) => !key.env[name]);
     return {
-      providerInstanceId,
-      providerTypeId: providerType.id,
+      keyId,
+      providerTypeId,
       ok: missing.length === 0,
       missingEnv: missing,
     };
   }
 
-  async createRun(api: ApiPublication, input: RunInput): Promise<TerraformRun> {
-    if (!api.allowedActions.includes(input.action)) {
-      throw new Error(`Action ${input.action} is not allowed for API ${api.id}`);
+  async deploy(api: ApiPublication, input: RunInput) {
+    return this.createRun(api, "deploy", input);
+  }
+
+  async delete(api: ApiPublication, input: RunInput) {
+    return this.createRun(api, "delete", input);
+  }
+
+  async status(apiId: string) {
+    await this.store.getApi(apiId);
+    const latestRun = await this.store.getLatestRun(apiId);
+    return { apiId, latestRun };
+  }
+
+  async output(apiId: string) {
+    await this.store.getApi(apiId);
+    const latestRun = await this.store.getLatestRun(apiId);
+    if (!latestRun || latestRun.status !== "succeeded") {
+      return { apiId, outputs: {}, latestRun };
+    }
+    const env = terraformEnv({});
+    const result = await runTerraform(["output", "-json"], this.store.runPath(apiId, latestRun.id), env);
+    if (result.exitCode !== 0) {
+      return { apiId, outputs: {}, latestRun, error: "Terraform output failed" };
+    }
+    return { apiId, outputs: redactTerraformOutputs(parseOutputJson(result.output)), latestRun };
+  }
+
+  private async createRun(api: ApiPublication, action: DeploymentAction, input: RunInput): Promise<TerraformRun> {
+    if (!api.allowedActions.includes(action)) {
+      throw new Error(`Action ${action} is not allowed for API ${api.id}`);
     }
 
-    const template = await this.store.getTemplate(api.templateId);
+    const template = await this.store.getTemplate(api.providerTypeId, api.templateId);
     const missing = template.variables.filter(
       (variable) => variable.required && input.vars[variable.name] === undefined,
     );
@@ -39,43 +65,39 @@ export class TerraformService {
       throw new Error(`Missing variables: ${missing.map((variable) => variable.name).join(", ")}`);
     }
 
+    const sensitiveVarNames = template.variables
+      .filter((variable) => variable.sensitive)
+      .map((variable) => variable.name);
+    const executionVars = sanitizeVars(
+      template.variables.map((variable) => variable.name),
+      input.vars,
+    );
     const run: TerraformRun = {
       id: crypto.randomUUID(),
       apiId: api.id,
-      workspaceId: api.workspaceId,
+      providerTypeId: api.providerTypeId,
+      keyId: api.keyId,
       templateId: api.templateId,
-      providerInstanceId: api.providerInstanceId,
-      action: input.action,
+      action,
       status: "queued",
-      vars: redactVars(
-        input.vars,
-        template.variables.filter((variable) => variable.sensitive).map((variable) => variable.name),
-      ),
-      sensitiveVarNames: template.variables
-        .filter((variable) => variable.sensitive)
-        .map((variable) => variable.name)
-        .sort(),
+      vars: redactVars(input.vars, sensitiveVarNames),
+      sensitiveVarNames: sensitiveVarNames.sort(),
       stateId: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
-    const executionVars = sanitizeVars(
-      template.variables.map((variable) => variable.name),
-      input.vars,
-    );
     await this.store.saveRun(run);
     return this.execute(run, executionVars);
   }
 
-  async execute(run: TerraformRun, executionVars: Record<string, string>): Promise<TerraformRun> {
+  private async execute(run: TerraformRun, executionVars: Record<string, string>): Promise<TerraformRun> {
     const api = await this.store.getApi(run.apiId);
-    const template = await this.store.getTemplate(api.templateId);
-    const providerInstance = await this.store.getProviderInstance(api.providerInstanceId);
-    const providerType = await this.store.getProviderType(providerInstance.providerTypeId);
-    const credential = await this.store.getCredential(providerInstance.credentialId);
+    const template = await this.store.getTemplate(api.providerTypeId, api.templateId);
+    const providerType = await this.store.getProviderType(api.providerTypeId);
+    const key = await this.store.getKey(api.providerTypeId, api.keyId);
     const runDir = this.store.runPath(run.apiId, run.id);
-    const secrets = [...Object.values(credential.env), ...Object.values(executionVars)];
+    const secrets = [...Object.values(key.env), ...Object.values(executionVars)];
 
     await mkdir(runDir, { recursive: true });
     await Promise.all(
@@ -91,9 +113,7 @@ export class TerraformService {
     await writeFile(
       join(runDir, "versions.tf"),
       providerRequirement(providerType.sourceAddress, providerType.versionConstraint),
-      {
-        mode: 0o600,
-      },
+      { mode: 0o600 },
     );
     await writeFile(
       join(runDir, "provider.json"),
@@ -103,7 +123,7 @@ export class TerraformService {
       },
     );
 
-    const env = terraformEnv(credential.env);
+    const env = terraformEnv(key.env);
     const init = await runTerraform(["init", "-input=false"], runDir, env);
     if (init.exitCode !== 0) {
       return this.fail(run, init.exitCode, init.output, secrets);
@@ -115,12 +135,9 @@ export class TerraformService {
     }
 
     const action = await runTerraform(terraformArgs(run.action), runDir, env);
-    const status = action.exitCode === 0 ? successStatus(run.action) : "failed";
     const redactedOutput = redactSecrets(action.output, secrets);
-    const updated = updateRun(run, status, action.exitCode, redactedOutput);
-    await writeFile(join(runDir, "logs.redacted.txt"), redactedOutput, {
-      mode: 0o600,
-    });
+    const updated = updateRun(run, action.exitCode === 0 ? "succeeded" : "failed", action.exitCode, redactedOutput);
+    await writeFile(join(runDir, "logs.redacted.txt"), redactedOutput, { mode: 0o600 });
     await this.store.saveRun(updated);
     return updated;
   }
@@ -159,14 +176,14 @@ async function runTerraform(args: string[], cwd: string, env: Record<string, str
   return { exitCode, output: `${stdout}${stderr}` };
 }
 
-function terraformEnv(credentialEnv: Record<string, string>) {
+function terraformEnv(keyEnv: Record<string, string>) {
   return {
     HOME: Bun.env.HOME,
     PATH: Bun.env.PATH,
     TF_IN_AUTOMATION: "1",
     TF_INPUT: "0",
     TF_LOG: "",
-    ...credentialEnv,
+    ...keyEnv,
   };
 }
 
@@ -205,23 +222,38 @@ function redactVars(vars: Record<string, string>, sensitiveNames: string[]) {
   );
 }
 
-function terraformArgs(action: TerraformAction) {
-  switch (action) {
-    case "plan":
-      return ["plan", "-input=false", "-no-color", "-out=plan.bin"];
-    case "apply":
-      return ["apply", "-input=false", "-no-color", "-auto-approve"];
-    case "destroy":
-      return ["destroy", "-input=false", "-no-color", "-auto-approve"];
-    case "refresh":
-      return ["refresh", "-input=false", "-no-color"];
-  }
-}
-
-function successStatus(action: TerraformAction): TerraformRun["status"] {
-  return action === "plan" ? "planned" : "succeeded";
+function terraformArgs(action: DeploymentAction) {
+  return action === "deploy"
+    ? ["apply", "-input=false", "-no-color", "-auto-approve"]
+    : ["destroy", "-input=false", "-no-color", "-auto-approve"];
 }
 
 function redactSecrets(output: string, secrets: string[]) {
   return secrets.reduce((current, secret) => (secret ? current.replaceAll(secret, "[REDACTED]") : current), output);
+}
+
+function parseOutputJson(output: string) {
+  try {
+    return JSON.parse(output) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function redactTerraformOutputs(outputs: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(outputs).map(([name, value]) => [name, redactTerraformOutputValue(value)]));
+}
+
+function redactTerraformOutputValue(value: unknown) {
+  if (!isTerraformOutputObject(value) || value.sensitive !== true) {
+    return value;
+  }
+
+  return { ...value, value: "[REDACTED]" };
+}
+
+function isTerraformOutputObject(
+  value: unknown,
+): value is { sensitive?: boolean; value?: unknown; [key: string]: unknown } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

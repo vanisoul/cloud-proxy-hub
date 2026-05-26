@@ -2,17 +2,17 @@
 
 ## OVERVIEW
 
-`terraform-platform` is an admin-only Bun + Elysia Terraform management service. It stores configuration under `/config`, runtime Terraform artifacts under `/data`, and does not use a database.
+`terraform-platform` is an admin-only Bun + Elysia Terraform management service. It stores provider-scoped keys, templates, and published APIs under `/config`, runtime Terraform artifacts under `/data`, and does not use a database.
 
 ## WHERE TO LOOK
 
 | Task | Location | Notes |
 |------|----------|-------|
-| HTTP API / admin UI | `src/index.ts` | Elysia app, auth, API routes, simple HTML admin landing page. |
+| HTTP API / admin UI | `src/index.ts` | Elysia app, auth, provider-scoped API routes, simple HTML admin landing page. |
 | Provider catalog defaults | `src/config.ts` | Built-in `aliyun/alicloud` and `hashicorp/google` metadata. |
-| Domain types | `src/types.ts` | Provider, credential, workspace, template, API, run contracts. |
-| Filesystem storage | `src/storage.ts` | `/config` and `/data` repositories, redacted credential responses. |
-| Terraform execution | `src/terraform.ts` | `init`, `validate`, `plan` runner and runtime credential injection. |
+| Domain types | `src/types.ts` | Provider, key, template, API, run contracts. |
+| Filesystem storage | `src/storage.ts` | `/config/keys`, `/config/templates`, `/config/apis`, and `/data/apis` repositories. |
+| Terraform execution | `src/terraform.ts` | Deployment API resolver, Terraform runner, selected key env injection. |
 | Logging/redaction | `src/logger.ts` | Structured logs with secret-like key redaction. |
 
 ## CONVENTIONS
@@ -21,14 +21,16 @@
 - TypeScript path alias `@/*` maps to `./src/*`.
 - No Prisma, SQLite, Aliyun SDK, cron cleanup, or legacy VPN/SOCKS5 workflow remains.
 - Mutations must use non-GET routes.
-- Credentials are stored as runtime references and must not be returned by public API responses.
-- Terraform templates are server-side allowlisted and must reject backend/provisioner/local-exec/remote-exec constructs.
+- Cloud provider keys are created through admin API/UI and stored under `/config/keys/<provider-type>/<key-id>`.
+- Key values must not be returned by public API responses.
+- Terraform templates are server-side allowlisted and must reject terraform/backend/required_providers/provisioner/local-exec/remote-exec constructs.
 
 ## ANTI-PATTERNS
 
 - Do not reintroduce DB-backed platform state.
 - Do not add arbitrary Terraform source/backend/provider/env editing from UI/API.
-- Do not write raw credentials into generated `.tf`, `.tfvars`, logs, metadata, or responses.
+- Do not put cloud provider keys in `.env.example` or platform deployment env.
+- Do not write raw credentials into generated `.tf`, logs, metadata, or responses.
 - Do not commit `/config`, `/data`, `.terraform`, `*.tfstate`, or plan artifacts.
 
 ## COMMANDS

@@ -15,7 +15,7 @@ export const builtInProviderTypes: ProviderType[] = [
     sourceAddress: "aliyun/alicloud",
     versionConstraint: "~> 1.0",
     requiredEnv: ["ALICLOUD_ACCESS_KEY", "ALICLOUD_SECRET_KEY", "ALICLOUD_REGION"],
-    supportedActions: ["plan", "apply", "destroy", "refresh"],
+    supportedActions: ["deploy", "delete"],
     docsUrl: "https://registry.terraform.io/providers/aliyun/alicloud/latest/docs",
   },
   {
@@ -24,7 +24,7 @@ export const builtInProviderTypes: ProviderType[] = [
     sourceAddress: "hashicorp/google",
     versionConstraint: "~> 6.0",
     requiredEnv: ["GOOGLE_CREDENTIALS", "GOOGLE_PROJECT", "GOOGLE_REGION"],
-    supportedActions: ["plan", "apply", "destroy", "refresh"],
+    supportedActions: ["deploy", "delete"],
     docsUrl: "https://registry.terraform.io/providers/hashicorp/google/latest/docs",
   },
 ];

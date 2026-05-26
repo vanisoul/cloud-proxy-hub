@@ -6,37 +6,22 @@ export type ProviderType = {
   sourceAddress: string;
   versionConstraint: string;
   requiredEnv: string[];
-  supportedActions: TerraformAction[];
+  supportedActions: DeploymentAction[];
   docsUrl: string;
 };
 
-export type Credential = {
+export type ProviderKey = {
   id: string;
   providerTypeId: string;
   name: string;
+  description?: string;
   env: Record<string, string>;
-  allowedWorkspaceIds: string[];
   createdAt: string;
   updatedAt: string;
 };
 
-export type ProviderInstance = {
-  id: string;
-  providerTypeId: string;
-  credentialId: string;
-  name: string;
-  defaults: Record<string, string>;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type Workspace = {
-  id: string;
-  name: string;
-  allowedTemplateIds: string[];
-  currentStateId?: string;
-  createdAt: string;
-  updatedAt: string;
+export type PublicProviderKey = Omit<ProviderKey, "env"> & {
+  envKeys: string[];
 };
 
 export type TemplateVariable = {
@@ -48,37 +33,42 @@ export type TemplateVariable = {
 
 export type TerraformTemplate = {
   id: string;
-  name: string;
   providerTypeId: string;
+  name: string;
   version: string;
+  description?: string;
   variables: TemplateVariable[];
   files: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 };
 
+export type PublicTerraformTemplate = Omit<TerraformTemplate, "files"> & {
+  fileNames: string[];
+};
+
 export type ApiPublication = {
   id: string;
+  providerTypeId: string;
   name: string;
-  workspaceId: string;
+  keyId: string;
   templateId: string;
-  providerInstanceId: string;
-  allowedActions: TerraformAction[];
+  allowedActions: DeploymentAction[];
   createdAt: string;
   updatedAt: string;
 };
 
-export type TerraformAction = "plan" | "apply" | "destroy" | "refresh";
+export type DeploymentAction = "deploy" | "delete";
 
-export type RunStatus = "queued" | "planning" | "planned" | "applying" | "succeeded" | "failed" | "needs_attention";
+export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "needs_attention";
 
 export type TerraformRun = {
   id: string;
   apiId: string;
-  workspaceId: string;
+  providerTypeId: string;
+  keyId: string;
   templateId: string;
-  providerInstanceId: string;
-  action: TerraformAction;
+  action: DeploymentAction;
   status: RunStatus;
   vars: Record<string, string>;
   sensitiveVarNames: string[];
@@ -87,8 +77,4 @@ export type TerraformRun = {
   updatedAt: string;
   exitCode?: number;
   error?: string;
-};
-
-export type PublicCredential = Omit<Credential, "env"> & {
-  envKeys: string[];
 };

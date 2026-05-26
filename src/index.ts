@@ -18,34 +18,18 @@ await store.initialize();
 const idSchema = t.String({ minLength: 1, pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]*$" });
 const stringRecord = t.Record(t.String(), t.String());
 
-const credentialSchema = t.Object({
+const keySchema = t.Object({
   id: idSchema,
-  providerTypeId: idSchema,
   name: t.String({ minLength: 1 }),
+  description: t.Optional(t.String()),
   env: stringRecord,
-  allowedWorkspaceIds: t.Array(idSchema),
-});
-
-const providerInstanceSchema = t.Object({
-  id: idSchema,
-  providerTypeId: idSchema,
-  credentialId: idSchema,
-  name: t.String({ minLength: 1 }),
-  defaults: stringRecord,
-});
-
-const workspaceSchema = t.Object({
-  id: idSchema,
-  name: t.String({ minLength: 1 }),
-  allowedTemplateIds: t.Array(idSchema),
-  currentStateId: t.Optional(idSchema),
 });
 
 const templateSchema = t.Object({
   id: idSchema,
   name: t.String({ minLength: 1 }),
-  providerTypeId: idSchema,
   version: t.String({ minLength: 1 }),
+  description: t.Optional(t.String()),
   variables: t.Array(
     t.Object({
       name: idSchema,
@@ -60,20 +44,18 @@ const templateSchema = t.Object({
 const apiSchema = t.Object({
   id: idSchema,
   name: t.String({ minLength: 1 }),
-  workspaceId: idSchema,
+  keyId: idSchema,
   templateId: idSchema,
-  providerInstanceId: idSchema,
-  allowedActions: t.Array(t.Union([t.Literal("plan"), t.Literal("apply"), t.Literal("destroy"), t.Literal("refresh")])),
+  allowedActions: t.Array(t.Union([t.Literal("deploy"), t.Literal("delete")])),
 });
 
 const runSchema = t.Object({
-  action: t.Union([t.Literal("plan"), t.Literal("apply"), t.Literal("destroy"), t.Literal("refresh")]),
   vars: stringRecord,
 });
 
 const app = new Elysia()
   .onBeforeHandle(({ headers, path, request }) => {
-    if (path === "/" || path.startsWith("/assets")) {
+    if (path.startsWith("/assets")) {
       return;
     }
 
@@ -83,37 +65,110 @@ const app = new Elysia()
       return new Response("Unauthorized", { status: 401 });
     }
   })
-  .onError(({ error, code }) => {
+  .onError(({ error, code, set }) => {
     const message = error instanceof Error ? error.message : String(error);
+    if (code === "VALIDATION") {
+      logger.error("請求處理失敗", { code });
+      set.status = 400;
+      return { error: "Invalid request" };
+    }
+
     logger.error("請求處理失敗", { code, error: message });
-    return new Response(JSON.stringify({ error: message }), {
-      status: code === "VALIDATION" || isClientInputError(message) ? 400 : 500,
-      headers: { "content-type": "application/json" },
-    });
+    set.status = isNotFoundError(message) ? 404 : isClientInputError(message) ? 400 : 500;
+    return { error: message };
   })
   .get("/", () => adminPage(), { detail: { summary: "Admin UI" } })
   .get("/health", () => ({ ok: true, service: "terraform-platform" }))
   .get("/api/provider-types", async () => store.listProviderTypes())
-  .get("/api/credentials", async () => store.listCredentials())
-  .post("/api/credentials", async ({ body }) => store.saveCredential(body), { body: credentialSchema })
-  .get("/api/provider-instances", async () => store.listProviderInstances())
-  .post("/api/provider-instances", async ({ body }) => store.saveProviderInstance(body), {
-    body: providerInstanceSchema,
+  .get("/api/providers/:providerTypeId/keys", async ({ params }) => store.listKeys(params.providerTypeId), {
+    params: t.Object({ providerTypeId: idSchema }),
   })
-  .post("/api/provider-instances/:id/test", async ({ params }) => terraform.testProviderInstance(params.id), {
-    params: t.Object({ id: idSchema }),
+  .post(
+    "/api/providers/:providerTypeId/keys",
+    async ({ params, body }) => store.saveKey({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: keySchema },
+  )
+  .get(
+    "/api/providers/:providerTypeId/keys/:keyId",
+    async ({ params }) => store.getPublicKey(params.providerTypeId, params.keyId),
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }) },
+  )
+  .delete(
+    "/api/providers/:providerTypeId/keys/:keyId",
+    async ({ params }) => {
+      await store.deleteKey(params.providerTypeId, params.keyId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }) },
+  )
+  .post(
+    "/api/providers/:providerTypeId/keys/:keyId/test",
+    async ({ params }) => terraform.testKey(params.providerTypeId, params.keyId),
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }) },
+  )
+  .get("/api/providers/:providerTypeId/templates", async ({ params }) => store.listTemplates(params.providerTypeId), {
+    params: t.Object({ providerTypeId: idSchema }),
   })
-  .get("/api/workspaces", async () => store.listWorkspaces())
-  .post("/api/workspaces", async ({ body }) => store.saveWorkspace(body), { body: workspaceSchema })
-  .get("/api/templates", async () => store.listTemplates())
-  .post("/api/templates", async ({ body }) => store.saveTemplate(body), { body: templateSchema })
-  .get("/api/apis", async () => store.listApis())
-  .post("/api/apis", async ({ body }) => store.saveApi(body), { body: apiSchema })
-  .post("/api/apis/:id/runs", async ({ params, body }) => terraform.createRun(await store.getApi(params.id), body), {
-    params: t.Object({ id: idSchema }),
-    body: runSchema,
+  .post(
+    "/api/providers/:providerTypeId/templates",
+    async ({ params, body }) => store.saveTemplate({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: templateSchema },
+  )
+  .get(
+    "/api/providers/:providerTypeId/templates/:templateId",
+    async ({ params }) => store.getTemplate(params.providerTypeId, params.templateId),
+    { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
+  )
+  .delete(
+    "/api/providers/:providerTypeId/templates/:templateId",
+    async ({ params }) => {
+      await store.deleteTemplate(params.providerTypeId, params.templateId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
+  )
+  .get("/api/providers/:providerTypeId/apis", async ({ params }) => store.listApis(params.providerTypeId), {
+    params: t.Object({ providerTypeId: idSchema }),
   })
-  .get("/api/apis/:apiId/runs/:runId", async ({ params }) => store.getRun(params.apiId, params.runId), {
+  .post(
+    "/api/providers/:providerTypeId/apis",
+    async ({ params, body }) => store.saveApi({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: apiSchema },
+  )
+  .get("/api/apis/:apiId", async ({ params }) => store.getApi(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .delete(
+    "/api/apis/:apiId",
+    async ({ params }) => {
+      await store.deleteApi(params.apiId);
+      return { ok: true };
+    },
+    { params: t.Object({ apiId: idSchema }) },
+  )
+  .post(
+    "/api/deployments/:apiId/deploy",
+    async ({ params, body }) => terraform.deploy(await store.getApi(params.apiId), body),
+    {
+      params: t.Object({ apiId: idSchema }),
+      body: runSchema,
+    },
+  )
+  .post(
+    "/api/deployments/:apiId/delete",
+    async ({ params, body }) => terraform.delete(await store.getApi(params.apiId), body),
+    {
+      params: t.Object({ apiId: idSchema }),
+      body: runSchema,
+    },
+  )
+  .get("/api/deployments/:apiId/status", async ({ params }) => terraform.status(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/api/deployments/:apiId/output", async ({ params }) => terraform.output(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/api/deployments/:apiId/runs/:runId", async ({ params }) => store.getRun(params.apiId, params.runId), {
     params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
   })
   .listen(appConfig.port);
@@ -147,24 +202,24 @@ function adminPage() {
 <body>
   <main>
     <h1>Terraform Platform</h1>
-    <p>Admin-only config-driven Terraform 管理工具。設定存在 <code>/config</code>，執行狀態存在 <code>/data</code>。</p>
+    <p>Admin-only config-driven Terraform 管理工具。Key、Template、API 都存在 <code>/config</code>，部署執行狀態存在 <code>/data</code>。</p>
     <div class="grid">
-      <section><h2>1. Provider</h2><p>建立 credential、provider instance，並用 test endpoint 檢查必要環境變數。</p></section>
-      <section><h2>2. Template</h2><p>新增受 allowlist 限制的 Terraform template；禁止 backend、provisioner、local-exec。</p></section>
-      <section><h2>3. Publish API</h2><p>把 workspace、template、provider instance 綁成可呼叫 API。</p></section>
-      <section><h2>4. Run</h2><p>呼叫 API 建立 run，系統會產生 workspace、執行 init/validate/plan 並保存 artifact。</p></section>
+      <section><h2>1. Provider</h2><p>選擇 Terraform provider type，例如 aliyun/alicloud 或 hashicorp/google。</p></section>
+      <section><h2>2. Key</h2><p>在 provider 底下建立多組 key；key secret 存在 config，API response 只回 envKeys。</p></section>
+      <section><h2>3. Template</h2><p>在 provider 底下建立 Terraform template；禁止 backend、provider declarations 與 provisioner。</p></section>
+      <section><h2>4. API</h2><p>選擇 provider + key + template 發布 API，再用 API UUID 呼叫 deploy/delete/status/output。</p></section>
     </div>
     <section>
       <h2>API quick links</h2>
       <pre>GET  /api/provider-types
-POST /api/credentials
-POST /api/provider-instances
-POST /api/provider-instances/:id/test
-POST /api/workspaces
-POST /api/templates
-POST /api/apis
-POST /api/apis/:id/runs
-GET  /api/apis/:apiId/runs/:runId</pre>
+POST /api/providers/:providerTypeId/keys
+POST /api/providers/:providerTypeId/templates
+POST /api/providers/:providerTypeId/apis
+POST /api/deployments/:apiId/deploy
+POST /api/deployments/:apiId/delete
+GET  /api/deployments/:apiId/status
+GET  /api/deployments/:apiId/output
+GET  /api/deployments/:apiId/runs/:runId</pre>
     </section>
   </main>
 </body>
@@ -178,8 +233,14 @@ function isClientInputError(message: string) {
     message.startsWith("Template file ") ||
     message.startsWith("Action ") ||
     message.startsWith("Missing variables: ") ||
-    message.startsWith("Variable ")
+    message.startsWith("Variable ") ||
+    message.includes("not supported") ||
+    message.includes("referenced by API")
   );
+}
+
+function isNotFoundError(message: string) {
+  return message.startsWith("API ") && message.endsWith("not found");
 }
 
 export type App = typeof app;

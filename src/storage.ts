@@ -4,24 +4,21 @@ import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { appConfig, builtInProviderTypes } from "@/config";
 import type {
   ApiPublication,
-  Credential,
-  ProviderInstance,
+  ProviderKey,
   ProviderType,
-  PublicCredential,
+  PublicProviderKey,
+  PublicTerraformTemplate,
   TerraformRun,
   TerraformTemplate,
-  Workspace,
 } from "@/types";
 
-type CollectionName = "credentials" | "provider-instances" | "workspaces" | "templates" | "apis";
+type TemplateInput = Omit<TerraformTemplate, "createdAt" | "updatedAt">;
 
 export class PlatformStore {
   async initialize() {
     await Promise.all([
       mkdir(this.configPath("terraform-providers"), { recursive: true }),
-      mkdir(this.configPath("credentials"), { recursive: true }),
-      mkdir(this.configPath("provider-instances"), { recursive: true }),
-      mkdir(this.configPath("workspaces"), { recursive: true }),
+      mkdir(this.configPath("keys"), { recursive: true }),
       mkdir(this.configPath("templates"), { recursive: true }),
       mkdir(this.configPath("apis"), { recursive: true }),
       mkdir(this.dataPath("apis"), { recursive: true }),
@@ -41,98 +38,136 @@ export class PlatformStore {
     return this.readJson<ProviderType>(this.configPath("terraform-providers", `${id}.json`));
   }
 
-  async listCredentials(): Promise<PublicCredential[]> {
-    const credentials = await this.listFiles<Credential>(this.configPath("credentials"));
-    return credentials.map(toPublicCredential);
+  async listKeys(providerTypeId?: string): Promise<PublicProviderKey[]> {
+    const providerIds = providerTypeId ? [providerTypeId] : await this.listProviderTypeIds();
+    const nested = await Promise.all(providerIds.map((id) => this.listProviderKeys(id)));
+    return nested.flat().sort((left, right) => left.id.localeCompare(right.id));
   }
 
-  async getCredential(id: string): Promise<Credential> {
-    return this.readJson<Credential>(this.configPath("credentials", `${id}.json`));
+  async getPublicKey(providerTypeId: string, keyId: string): Promise<PublicProviderKey> {
+    return toPublicKey(await this.getKey(providerTypeId, keyId));
   }
 
-  async saveCredential(input: Omit<Credential, "createdAt" | "updatedAt">): Promise<PublicCredential> {
-    const now = new Date().toISOString();
-    const credential: Credential = { ...input, createdAt: now, updatedAt: now };
-    await this.writeCollection("credentials", credential.id, credential);
-    return toPublicCredential(credential);
+  async getKey(providerTypeId: string, keyId: string): Promise<ProviderKey> {
+    const metadata = await this.readJson<Omit<ProviderKey, "env">>(
+      this.keyPath(providerTypeId, keyId, "metadata.json"),
+    );
+    const secret = await this.readJson<Pick<ProviderKey, "env">>(this.keyPath(providerTypeId, keyId, "secret.json"));
+    return { ...metadata, env: secret.env };
   }
 
-  async listProviderInstances(): Promise<ProviderInstance[]> {
-    return this.listFiles<ProviderInstance>(this.configPath("provider-instances"));
-  }
-
-  async getProviderInstance(id: string): Promise<ProviderInstance> {
-    return this.readJson<ProviderInstance>(this.configPath("provider-instances", `${id}.json`));
-  }
-
-  async saveProviderInstance(input: Omit<ProviderInstance, "createdAt" | "updatedAt">): Promise<ProviderInstance> {
+  async saveKey(input: Omit<ProviderKey, "createdAt" | "updatedAt">): Promise<PublicProviderKey> {
     await this.getProviderType(input.providerTypeId);
-    await this.getCredential(input.credentialId);
     const now = new Date().toISOString();
-    const instance = { ...input, createdAt: now, updatedAt: now };
-    await this.writeCollection("provider-instances", instance.id, instance);
-    return instance;
+    const key: ProviderKey = { ...input, createdAt: now, updatedAt: now };
+    const keyDir = this.keyPath(key.providerTypeId, key.id);
+    await mkdir(keyDir, { recursive: true });
+    const { env, ...metadata } = key;
+    await this.writeJson(join(keyDir, "metadata.json"), metadata);
+    await this.writeJson(join(keyDir, "secret.json"), { env });
+    return toPublicKey(key);
   }
 
-  async listWorkspaces(): Promise<Workspace[]> {
-    return this.listFiles<Workspace>(this.configPath("workspaces"));
+  async deleteKey(providerTypeId: string, keyId: string) {
+    await this.assertApiDoesNotReference(providerTypeId, { keyId });
+    await rm(this.keyPath(providerTypeId, keyId), { recursive: true, force: true });
   }
 
-  async getWorkspace(id: string): Promise<Workspace> {
-    return this.readJson<Workspace>(this.configPath("workspaces", `${id}.json`));
+  async listTemplates(providerTypeId?: string): Promise<PublicTerraformTemplate[]> {
+    const providerIds = providerTypeId ? [providerTypeId] : await this.listProviderTypeIds();
+    const nested = await Promise.all(providerIds.map((id) => this.listProviderTemplates(id)));
+    return nested.flat().sort((left, right) => left.id.localeCompare(right.id));
   }
 
-  async saveWorkspace(input: Omit<Workspace, "createdAt" | "updatedAt">): Promise<Workspace> {
-    const now = new Date().toISOString();
-    const workspace = { ...input, createdAt: now, updatedAt: now };
-    await this.writeCollection("workspaces", workspace.id, workspace);
-    return workspace;
+  async getTemplate(providerTypeId: string, templateId: string): Promise<TerraformTemplate> {
+    const metadata = await this.readJson<Omit<TerraformTemplate, "files">>(
+      this.templatePath(providerTypeId, templateId, "metadata.json"),
+    );
+    const files = await this.readTemplateFiles(this.templatePath(providerTypeId, templateId, "files"));
+    return { ...metadata, files };
   }
 
-  async listTemplates(): Promise<TerraformTemplate[]> {
-    return this.listFiles<TerraformTemplate>(this.configPath("templates"));
-  }
-
-  async getTemplate(id: string): Promise<TerraformTemplate> {
-    return this.readJson<TerraformTemplate>(this.configPath("templates", `${id}.json`));
-  }
-
-  async saveTemplate(input: Omit<TerraformTemplate, "createdAt" | "updatedAt">): Promise<TerraformTemplate> {
+  async saveTemplate(input: TemplateInput): Promise<PublicTerraformTemplate> {
     await this.getProviderType(input.providerTypeId);
     assertSafeTemplate(input);
     const now = new Date().toISOString();
-    const template = { ...input, createdAt: now, updatedAt: now };
-    await this.writeCollection("templates", template.id, template);
-    return template;
+    const template: TerraformTemplate = { ...input, createdAt: now, updatedAt: now };
+    const templateDir = this.templatePath(template.providerTypeId, template.id);
+    const filesDir = join(templateDir, "files");
+    await rm(filesDir, { recursive: true, force: true });
+    await mkdir(filesDir, { recursive: true });
+    const { files, ...metadata } = template;
+    await this.writeJson(join(templateDir, "metadata.json"), metadata);
+    await Promise.all(
+      Object.entries(files).map(async ([fileName, content]) => {
+        const filePath = join(filesDir, fileName);
+        await mkdir(dirname(filePath), { recursive: true });
+        await writeFile(filePath, content, { mode: 0o600 });
+      }),
+    );
+    return toPublicTemplate(template);
   }
 
-  async listApis(): Promise<ApiPublication[]> {
-    return this.listFiles<ApiPublication>(this.configPath("apis"));
+  async deleteTemplate(providerTypeId: string, templateId: string) {
+    await this.assertApiDoesNotReference(providerTypeId, { templateId });
+    await rm(this.templatePath(providerTypeId, templateId), { recursive: true, force: true });
   }
 
-  async getApi(id: string): Promise<ApiPublication> {
-    return this.readJson<ApiPublication>(this.configPath("apis", `${id}.json`));
+  async listApis(providerTypeId?: string): Promise<ApiPublication[]> {
+    const providerIds = providerTypeId ? [providerTypeId] : await this.listProviderTypeIds();
+    const nested = await Promise.all(providerIds.map((id) => this.listProviderApis(id)));
+    return nested.flat().sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async getApi(apiId: string): Promise<ApiPublication> {
+    const matches = await Promise.all(
+      (await this.listProviderTypeIds()).map(async (providerTypeId) => {
+        try {
+          return await this.getProviderApi(providerTypeId, apiId);
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    const api = matches.find((value): value is ApiPublication => value !== undefined);
+    if (!api) {
+      throw new Error(`API ${apiId} not found`);
+    }
+    return api;
+  }
+
+  async getProviderApi(providerTypeId: string, apiId: string): Promise<ApiPublication> {
+    return this.readJson<ApiPublication>(this.apiPath(providerTypeId, apiId, "metadata.json"));
   }
 
   async saveApi(input: Omit<ApiPublication, "createdAt" | "updatedAt">): Promise<ApiPublication> {
-    const workspace = await this.getWorkspace(input.workspaceId);
-    const template = await this.getTemplate(input.templateId);
-    const providerInstance = await this.getProviderInstance(input.providerInstanceId);
-    const credential = await this.getCredential(providerInstance.credentialId);
-    if (template.providerTypeId !== providerInstance.providerTypeId) {
-      throw new Error("Template provider type does not match provider instance");
+    const providerType = await this.getProviderType(input.providerTypeId);
+    await this.getKey(input.providerTypeId, input.keyId);
+    await this.getTemplate(input.providerTypeId, input.templateId);
+    for (const action of input.allowedActions) {
+      if (!providerType.supportedActions.includes(action)) {
+        throw new Error(`Action ${action} is not supported by provider ${providerType.id}`);
+      }
     }
-    if (!workspace.allowedTemplateIds.includes(template.id)) {
-      throw new Error("Template is not allowed in this workspace");
-    }
-    if (!credential.allowedWorkspaceIds.includes(workspace.id)) {
-      throw new Error("Credential is not allowed in this workspace");
+    const existingApis = await this.listApis();
+    const conflictingApi = existingApis.find(
+      (api) => api.id === input.id && api.providerTypeId !== input.providerTypeId,
+    );
+    if (conflictingApi) {
+      throw new Error(`API ${input.id} already exists under provider ${conflictingApi.providerTypeId}`);
     }
     const now = new Date().toISOString();
     const api = { ...input, createdAt: now, updatedAt: now };
-    await this.writeCollection("apis", api.id, api);
+    const apiDir = this.apiPath(api.providerTypeId, api.id);
+    await mkdir(apiDir, { recursive: true });
+    await this.writeJson(join(apiDir, "metadata.json"), api);
     await mkdir(this.apiDataPath(api.id, "runs"), { recursive: true });
     return api;
+  }
+
+  async deleteApi(apiId: string) {
+    const api = await this.getApi(apiId);
+    await rm(this.apiPath(api.providerTypeId, api.id), { recursive: true, force: true });
   }
 
   async saveRun(run: TerraformRun): Promise<TerraformRun> {
@@ -145,6 +180,16 @@ export class PlatformStore {
 
   async getRun(apiId: string, runId: string): Promise<TerraformRun> {
     return this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"));
+  }
+
+  async getLatestRun(apiId: string): Promise<TerraformRun | undefined> {
+    const runsDir = this.apiDataPath(apiId, "runs");
+    await mkdir(runsDir, { recursive: true });
+    const runIds = await readdir(runsDir);
+    const runs = await Promise.all(
+      runIds.map((runId) => this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"))),
+    );
+    return runs.sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   }
 
   runPath(apiId: string, runId: string, ...parts: string[]) {
@@ -163,8 +208,68 @@ export class PlatformStore {
     return safeJoin(appConfig.dataDir, parts);
   }
 
-  private async writeCollection(collection: CollectionName, id: string, value: unknown) {
-    await this.writeJson(this.configPath(collection, `${id}.json`), value);
+  private async listProviderTypeIds() {
+    return (await this.listProviderTypes()).map((provider) => provider.id);
+  }
+
+  private keyPath(providerTypeId: string, keyId: string, ...parts: string[]) {
+    return this.configPath("keys", providerTypeId, keyId, ...parts);
+  }
+
+  private templatePath(providerTypeId: string, templateId: string, ...parts: string[]) {
+    return this.configPath("templates", providerTypeId, templateId, ...parts);
+  }
+
+  private apiPath(providerTypeId: string, apiId: string, ...parts: string[]) {
+    return this.configPath("apis", providerTypeId, apiId, ...parts);
+  }
+
+  private async listProviderKeys(providerTypeId: string) {
+    const providerDir = this.configPath("keys", providerTypeId);
+    await mkdir(providerDir, { recursive: true });
+    const keyIds = await readdir(providerDir);
+    return Promise.all(keyIds.map((keyId) => this.getPublicKey(providerTypeId, keyId)));
+  }
+
+  private async listProviderTemplates(providerTypeId: string) {
+    const providerDir = this.configPath("templates", providerTypeId);
+    await mkdir(providerDir, { recursive: true });
+    const templateIds = await readdir(providerDir);
+    return Promise.all(templateIds.map(async (id) => toPublicTemplate(await this.getTemplate(providerTypeId, id))));
+  }
+
+  private async listProviderApis(providerTypeId: string) {
+    const providerDir = this.configPath("apis", providerTypeId);
+    await mkdir(providerDir, { recursive: true });
+    const apiIds = await readdir(providerDir);
+    return Promise.all(apiIds.map((id) => this.getProviderApi(providerTypeId, id)));
+  }
+
+  private async assertApiDoesNotReference(providerTypeId: string, reference: { keyId?: string; templateId?: string }) {
+    const apis = await this.listApis(providerTypeId);
+    const found = apis.find(
+      (api) =>
+        (reference.keyId !== undefined && api.keyId === reference.keyId) ||
+        (reference.templateId !== undefined && api.templateId === reference.templateId),
+    );
+    if (found) {
+      throw new Error(`Resource is referenced by API ${found.id}`);
+    }
+  }
+
+  private async readTemplateFiles(directory: string, prefix = ""): Promise<Record<string, string>> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const chunks = await Promise.all(
+      entries.map(async (entry) => {
+        const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          return this.readTemplateFiles(path, relativePath);
+        }
+        return { [relativePath]: await readFile(path, "utf8") };
+      }),
+    );
+    return Object.assign({}, ...chunks);
   }
 
   private async listFiles<T>(directory: string): Promise<T[]> {
@@ -191,11 +296,20 @@ export class PlatformStore {
   async removeRuntimeData() {
     await rm(appConfig.dataDir, { recursive: true, force: true });
   }
+
+  async removeConfigData() {
+    await rm(appConfig.configDir, { recursive: true, force: true });
+  }
 }
 
-function toPublicCredential(credential: Credential): PublicCredential {
-  const { env, ...rest } = credential;
+function toPublicKey(key: ProviderKey): PublicProviderKey {
+  const { env, ...rest } = key;
   return { ...rest, envKeys: Object.keys(env).sort() };
+}
+
+function toPublicTemplate(template: TerraformTemplate): PublicTerraformTemplate {
+  const { files, ...rest } = template;
+  return { ...rest, fileNames: Object.keys(files).sort() };
 }
 
 function safeJoin(root: string, parts: string[]) {
@@ -214,7 +328,7 @@ function getId(value: unknown) {
   return "";
 }
 
-function assertSafeTemplate(template: Omit<TerraformTemplate, "createdAt" | "updatedAt">) {
+function assertSafeTemplate(template: TemplateInput) {
   for (const [fileName, content] of Object.entries(template.files)) {
     if (isUnsafeRelativePath(fileName)) {
       throw new Error(`Template file ${fileName} is not a safe relative path`);
@@ -222,7 +336,11 @@ function assertSafeTemplate(template: Omit<TerraformTemplate, "createdAt" | "upd
     if (!fileName.endsWith(".tf") && !fileName.endsWith(".tf.json")) {
       throw new Error(`Template file ${fileName} is not a Terraform file`);
     }
-    if (/provisioner\s+|backend\s+|required_providers\s+|local-exec|remote-exec/i.test(content)) {
+    if (
+      /(?:^|[^A-Za-z0-9_-])(?:terraform|backend|required_providers|provider|provisioner|local-exec|remote-exec)(?=[^A-Za-z0-9_-]|$)/i.test(
+        content,
+      )
+    ) {
       throw new Error(`Template file ${fileName} contains a blocked Terraform construct`);
     }
     if (fileName.endsWith(".tf.json") && hasBlockedTerraformJsonConstruct(content)) {
@@ -248,9 +366,9 @@ function containsBlockedJsonKey(value: unknown): boolean {
   }
   return Object.entries(value).some(
     ([key, child]) =>
-      ["backend", "provisioner", "required_providers"].includes(key) ||
-      (key === "terraform" && typeof child === "object") ||
-      containsBlockedJsonKey(child),
+      ["terraform", "backend", "provider", "provisioner", "required_providers", "local-exec", "remote-exec"].includes(
+        key,
+      ) || containsBlockedJsonKey(child),
   );
 }
 
