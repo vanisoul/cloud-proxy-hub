@@ -24,18 +24,6 @@ dev:
     echo "啟動開發服務器"
     bun run dev
 
-# 初始化資料庫
-db-init:
-    #!/usr/bin/env bash
-    echo "初始化資料庫"
-    bun run db:init
-
-# 重置資料庫
-db-reset:
-    #!/usr/bin/env bash
-    echo "重置資料庫"
-    bun run db:reset
-
 # 構建 Docker 映像檔
 build version="0.0.1":
     #!/usr/bin/env bash
@@ -46,7 +34,7 @@ build version="0.0.1":
     '
 
     DOCKER_HUB_ACCOUNT=${DOCKER_HUB_ACCOUNT:-cloudproxyhub}
-    IMAGE_NAME="cloud-proxy-hub"
+    IMAGE_NAME="terraform-platform"
     FULL_IMAGE_NAME="$DOCKER_HUB_ACCOUNT/$IMAGE_NAME"
 
     echo "構建 Docker 映像檔 $FULL_IMAGE_NAME:{{version}}"
@@ -66,7 +54,7 @@ push version="0.0.1":
 
     DOCKER_HUB_ACCOUNT=${DOCKER_HUB_ACCOUNT:-cloudproxyhub}
     DOCKER_HUB_TOKEN=${DOCKER_HUB_TOKEN:-}
-    IMAGE_NAME="cloud-proxy-hub"
+    IMAGE_NAME="terraform-platform"
     FULL_IMAGE_NAME="$DOCKER_HUB_ACCOUNT/$IMAGE_NAME"
 
     echo "登錄到 Docker Hub"
@@ -107,7 +95,7 @@ run version="0.0.1" port="3000":
     '
 
     IMAGE_NAMESPACE=${IMAGE_NAMESPACE:-cloudproxyhub}
-    IMAGE_NAME="cloud-proxy-hub"
+    IMAGE_NAME="terraform-platform"
     FULL_IMAGE_NAME="$IMAGE_NAMESPACE/$IMAGE_NAME"
 
     DOCKER_HUB_ACCOUNT=$IMAGE_NAMESPACE \
@@ -125,7 +113,7 @@ stop:
     just stop
     '
 
-    IMAGE_NAME="cloud-proxy-hub"
+    IMAGE_NAME="terraform-platform"
 
     echo "停止並刪除 Docker 容器 $IMAGE_NAME"
     docker rm -vf $IMAGE_NAME || true
@@ -152,10 +140,9 @@ logs:
     just logs
     '
 
-    IMAGE_NAME="cloud-proxy-hub"
+    IMAGE_NAME="terraform-platform"
 
     echo "顯示 Docker 容器 $IMAGE_NAME 的日誌"
     docker logs -f $IMAGE_NAME
-
 
 

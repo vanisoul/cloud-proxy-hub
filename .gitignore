@@ -42,7 +42,14 @@ package-lock.json
 **/*.bun
 
 # by project
-src/data/aliyun.json
 tls
 .env
 generated
+/config
+/data
+/.terraform
+*.tfstate
+*.tfstate.backup
+*.tfplan
+
+.omo
