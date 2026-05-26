@@ -15,8 +15,11 @@ if (!appConfig.apiKey) {
 
 await store.initialize();
 
+const sessionCookieSecret = await deriveSessionCookieSecret();
 const idSchema = t.String({ minLength: 1, pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]*$" });
 const stringRecord = t.Record(t.String(), t.String());
+const sessionCookieName = "terraform_platform_session";
+const sessionCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
 
 const keySchema = t.Object({
   id: idSchema,
@@ -54,16 +57,37 @@ const runSchema = t.Object({
 });
 
 const app = new Elysia()
-  .onBeforeHandle(({ headers, path, request }) => {
-    if (path.startsWith("/assets")) {
+  .onBeforeHandle(async ({ headers, path, request }) => {
+    if (path.startsWith("/assets") || path === "/login") {
       return;
     }
 
-    const providedKey = headers.authorization?.replace(/^Bearer\s+/i, "") ?? "";
-    if (providedKey !== appConfig.apiKey) {
-      logger.warn("拒絕未授權請求", { path, method: request.method });
-      return new Response("Unauthorized", { status: 401 });
+    const bearerAuthorized = headers.authorization?.replace(/^Bearer\s+/i, "") === appConfig.apiKey;
+    if (path.startsWith("/api/")) {
+      if (!bearerAuthorized) {
+        logger.warn("拒絕未授權請求", { path, method: request.method });
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      return;
     }
+
+    const cookieAuthorized = await hasValidSessionCookie(request);
+    if (bearerAuthorized || cookieAuthorized) {
+      return;
+    }
+
+    if (path === "/" && request.method === "GET") {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: "/login",
+        },
+      });
+    }
+
+    logger.warn("拒絕未授權請求", { path, method: request.method });
+    return new Response("Unauthorized", { status: 401 });
   })
   .onError(({ error, code, set }) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -78,6 +102,39 @@ const app = new Elysia()
     return { error: message };
   })
   .get("/", () => adminPage(), { detail: { summary: "Admin UI" } })
+  .get("/login", () => loginPage(), { detail: { summary: "Login page" } })
+  .post("/login", async ({ request }) => {
+    const formData = await request.formData();
+    const adminKeyEntry = formData.get("adminKey");
+    const adminKey = typeof adminKeyEntry === "string" ? adminKeyEntry : "";
+    const keyMatches = await constantTimeEqualText(adminKey, appConfig.apiKey);
+
+    if (!keyMatches) {
+      return unauthorizedLoginPage();
+    }
+
+    const expiresAt = Date.now() + sessionCookieMaxAgeSeconds * 1000;
+    const sessionCookieValue = await buildSessionCookieValue(expiresAt);
+
+    return new Response(null, {
+      status: 303,
+      headers: {
+        location: "/",
+        "set-cookie": buildSessionCookieHeader(request.url, sessionCookieValue),
+      },
+    });
+  })
+  .post(
+    "/logout",
+    async ({ request }) =>
+      new Response(null, {
+        status: 303,
+        headers: {
+          location: "/login",
+          "set-cookie": buildClearedSessionCookieHeader(request.url),
+        },
+      }),
+  )
   .get("/health", () => ({ ok: true, service: "terraform-platform" }))
   .get("/api/provider-types", async () => store.listProviderTypes())
   .get("/api/providers/:providerTypeId/keys", async ({ params }) => store.listKeys(params.providerTypeId), {
@@ -197,12 +254,17 @@ function adminPage() {
     code, pre { background: #efede7; border-radius: 8px; padding: 2px 6px; }
     pre { padding: 14px; overflow: auto; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .toolbar { display: flex; justify-content: flex-end; margin: 16px 0 0; }
+    .toolbar button { border: 1px solid #1e2428; background: #1e2428; color: white; border-radius: 999px; padding: 10px 16px; cursor: pointer; }
   </style>
 </head>
 <body>
   <main>
     <h1>Terraform Platform</h1>
     <p>Admin-only config-driven Terraform 管理工具。Key、Template、API 都存在 <code>/config</code>，部署執行狀態存在 <code>/data</code>。</p>
+    <form class="toolbar" method="post" action="/logout">
+      <button type="submit">Logout</button>
+    </form>
     <div class="grid">
       <section><h2>1. Provider</h2><p>選擇 Terraform provider type，例如 aliyun/alicloud 或 hashicorp/google。</p></section>
       <section><h2>2. Key</h2><p>在 provider 底下建立多組 key；key secret 存在 config，API response 只回 envKeys。</p></section>
@@ -224,8 +286,143 @@ GET  /api/deployments/:apiId/runs/:runId</pre>
   </main>
 </body>
 </html>`,
-    { headers: { "content-type": "text/html; charset=utf-8" } },
+    { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } },
   );
+}
+
+function loginPage() {
+  return new Response(loginPageHtml(), {
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+function unauthorizedLoginPage() {
+  return new Response(loginPageHtml("Invalid admin key."), {
+    status: 401,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+function loginPageHtml(message?: string) {
+  return `<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Login - Terraform Platform</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f7f7f4; color: #1e2428; }
+    main { width: min(420px, calc(100vw - 32px)); background: white; border: 1px solid #ddd8cc; border-radius: 16px; padding: 28px; box-sizing: border-box; }
+    label { display: block; margin: 16px 0 8px; }
+    input { width: 100%; box-sizing: border-box; padding: 12px 14px; border: 1px solid #cfc8ba; border-radius: 10px; font: inherit; }
+    button { margin-top: 18px; width: 100%; border: 0; background: #1e2428; color: white; border-radius: 10px; padding: 12px 14px; font: inherit; cursor: pointer; }
+    .error { margin: 0 0 12px; color: #b42318; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Terraform Platform Login</h1>
+    ${message ? `<p class="error">${message}</p>` : ""}
+    <form method="post" action="/login">
+      <label for="adminKey">Admin Key</label>
+      <input id="adminKey" name="adminKey" type="password" autocomplete="current-password" required />
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
+function buildSessionCookieHeader(requestUrl: string, cookieValue: string) {
+  return buildCookieHeader(requestUrl, cookieValue, sessionCookieMaxAgeSeconds);
+}
+
+function buildClearedSessionCookieHeader(requestUrl: string) {
+  return buildCookieHeader(requestUrl, "", 0);
+}
+
+function buildCookieHeader(requestUrl: string, cookieValue: string, maxAgeSeconds: number) {
+  const secureAttribute = new URL(requestUrl).protocol === "https:" ? "; Secure" : "";
+  return `${sessionCookieName}=${cookieValue}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureAttribute}`;
+}
+
+async function hasValidSessionCookie(request: Request) {
+  const cookieHeader = request.headers.get("cookie");
+  const sessionCookie = getCookieValue(cookieHeader, sessionCookieName);
+  if (!sessionCookie) {
+    return false;
+  }
+
+  const [expiresAtText, providedSignature, ...rest] = sessionCookie.split(".");
+  if (!expiresAtText || !providedSignature || rest.length > 0 || !/^\d+$/.test(expiresAtText)) {
+    return false;
+  }
+
+  const expiresAt = Number(expiresAtText);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
+    return false;
+  }
+
+  const expectedSignature = await signSessionCookie(expiresAt);
+  return constantTimeEqualText(providedSignature, expectedSignature);
+}
+
+function getCookieValue(cookieHeader: string | null, cookieName: string) {
+  if (!cookieHeader) {
+    return "";
+  }
+
+  for (const part of cookieHeader.split(";")) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === cookieName) {
+      return rest.join("=");
+    }
+  }
+
+  return "";
+}
+
+async function constantTimeEqualText(left: string, right: string) {
+  const [leftBytes, rightBytes] = await Promise.all([sha256Bytes(left), sha256Bytes(right)]);
+  return constantTimeEqualBytes(new Uint8Array(leftBytes), new Uint8Array(rightBytes));
+}
+
+function constantTimeEqualBytes(left: Uint8Array, right: Uint8Array) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  let mismatch = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    mismatch |= left[index] ^ right[index];
+  }
+
+  return mismatch === 0;
+}
+
+async function buildSessionCookieValue(expiresAt: number) {
+  return `${expiresAt}.${await signSessionCookie(expiresAt)}`;
+}
+
+async function signSessionCookie(expiresAt: number) {
+  return sha256Hex(`${expiresAt}:${sessionCookieSecret}`);
+}
+
+async function deriveSessionCookieSecret() {
+  return sha256Hex(`terraform-platform-session-secret:${appConfig.apiKey}`);
+}
+
+async function sha256Hex(value: string) {
+  const bytes = await sha256Bytes(value);
+  return bytesToHex(new Uint8Array(bytes));
+}
+
+async function sha256Bytes(value: string) {
+  return crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+}
+
+function bytesToHex(bytes: Uint8Array) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function isClientInputError(message: string) {
