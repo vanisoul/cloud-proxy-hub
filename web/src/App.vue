@@ -31,23 +31,20 @@ type PageKey = "dashboard" | "keys" | "templates" | "apis" | "runtime";
 type ResourceKind = "key" | "template" | "api";
 
 type KeyForm = {
-  id: string;
   name: string;
   description: string;
   env: Record<string, string>;
 };
 
 type TemplateForm = {
-  id: string;
   name: string;
   version: string;
   description: string;
   variablesJson: string;
-  filesJson: string;
+  mainTf: string;
 };
 
 type ApiForm = {
-  id: string;
   name: string;
   keyId: string;
   templateId: string;
@@ -91,17 +88,17 @@ const statusResult = ref<unknown>(null);
 const outputResult = ref<unknown>(null);
 const runDetail = ref<unknown>(null);
 const currentLocale = ref<LocaleKey>(loadSavedLocale());
+const templateFiles = ref<Record<string, string>>({ "main.tf": sampleTemplate });
 
-const keyForm = reactive<KeyForm>({ id: "", name: "", description: "", env: {} });
+const keyForm = reactive<KeyForm>({ name: "", description: "", env: {} });
 const templateForm = reactive<TemplateForm>({
-  id: "",
   name: "",
   version: "1.0.0",
   description: "",
   variablesJson: JSON.stringify(sampleVariables, null, 2),
-  filesJson: JSON.stringify({ "main.tf": sampleTemplate }, null, 2),
+  mainTf: sampleTemplate,
 });
-const apiForm = reactive<ApiForm>({ id: "", name: "", keyId: "", templateId: "", allowedActions: [] });
+const apiForm = reactive<ApiForm>({ name: "", keyId: "", templateId: "", allowedActions: [] });
 
 const selectedProvider = computed(() => state.providerTypes.find((provider) => provider.id === selectedProviderId.value));
 const providerKeys = computed(() => state.keys.filter((key) => key.providerTypeId === selectedProviderId.value));
@@ -193,7 +190,6 @@ function formatJson(value: unknown, emptyText: string) {
 function openKeyDialog(key?: PublicProviderKey) {
   const provider = selectedProvider.value;
   editingKeyId.value = key?.id ?? "";
-  keyForm.id = key?.id ?? "";
   keyForm.name = key?.name ?? "";
   keyForm.description = key?.description ?? "";
   keyForm.env = Object.fromEntries((provider?.requiredEnv ?? []).map((envName) => [envName, ""]));
@@ -210,7 +206,6 @@ async function saveKey() {
     await requestJson<PublicProviderKey>(path, {
       method: "POST",
       body: JSON.stringify({
-        id: editingKeyId.value ? undefined : optionalText(keyForm.id),
         name: keyForm.name,
         description: optionalText(keyForm.description),
         env: keyForm.env,
@@ -224,12 +219,12 @@ async function saveKey() {
 
 function openTemplateDialog(template?: PublicTerraformTemplate) {
   editingTemplateId.value = template?.id ?? "";
-  templateForm.id = template?.id ?? "";
   templateForm.name = template?.name ?? "";
   templateForm.version = template?.version ?? "1.0.0";
   templateForm.description = template?.description ?? "";
   templateForm.variablesJson = JSON.stringify(template?.variables ?? sampleVariables, null, 2);
-  templateForm.filesJson = JSON.stringify({ "main.tf": sampleTemplate }, null, 2);
+  templateFiles.value = { "main.tf": sampleTemplate };
+  templateForm.mainTf = sampleTemplate;
   templateDialogVisible.value = true;
   if (template) {
     requestJson<TerraformTemplate>(
@@ -237,7 +232,8 @@ function openTemplateDialog(template?: PublicTerraformTemplate) {
     )
       .then((fullTemplate) => {
         templateForm.variablesJson = JSON.stringify(fullTemplate.variables, null, 2);
-        templateForm.filesJson = JSON.stringify(fullTemplate.files, null, 2);
+        templateFiles.value = fullTemplate.files;
+        templateForm.mainTf = fullTemplate.files["main.tf"] ?? "";
       })
       .catch(showError);
   }
@@ -247,14 +243,13 @@ async function saveTemplate() {
   await runAction(async () => {
     const provider = requireProvider();
     const variables = parseTemplateVariables(templateForm.variablesJson);
-    const files = parseStringRecord(templateForm.filesJson, t("form.templateFilesJson"));
+    const files = { ...templateFiles.value, "main.tf": templateForm.mainTf };
     const path = `/ui/providers/${encodeURIComponent(provider.id)}/templates${
       editingTemplateId.value ? `/${encodeURIComponent(editingTemplateId.value)}` : ""
     }`;
     await requestJson<PublicTerraformTemplate>(path, {
       method: "POST",
       body: JSON.stringify({
-        id: editingTemplateId.value ? undefined : optionalText(templateForm.id),
         name: templateForm.name,
         version: templateForm.version,
         description: optionalText(templateForm.description),
@@ -271,7 +266,6 @@ async function saveTemplate() {
 function openApiDialog(api?: ApiPublication) {
   const provider = selectedProvider.value;
   editingApiId.value = api?.id ?? "";
-  apiForm.id = api?.id ?? "";
   apiForm.name = api?.name ?? "";
   apiForm.keyId = api?.keyId ?? providerKeys.value[0]?.id ?? "";
   apiForm.templateId = api?.templateId ?? providerTemplates.value[0]?.id ?? "";
@@ -291,7 +285,6 @@ async function saveApi() {
     await requestJson<ApiPublication>(path, {
       method: "POST",
       body: JSON.stringify({
-        id: editingApiId.value ? undefined : optionalText(apiForm.id),
         name: apiForm.name,
         keyId: apiForm.keyId,
         templateId: apiForm.templateId,
@@ -706,7 +699,6 @@ function t(key: TranslationKey, params?: TranslationParams) {
   <el-dialog v-model="keyDialogVisible" :title="editingKeyId ? t('dialog.editKey') : t('dialog.createKey')" width="560px">
     <el-alert v-if="editingKeySecrets" class="form-tip" :title="t('dialog.secretTip')" type="warning" show-icon :closable="false" />
     <el-form label-position="top">
-      <el-form-item :label="t('form.resourceId')"><el-input v-model="keyForm.id" :disabled="Boolean(editingKeyId)" :placeholder="t('form.resourceIdPlaceholder')" /></el-form-item>
       <el-form-item :label="t('form.name')" required><el-input v-model="keyForm.name" /></el-form-item>
       <el-form-item :label="t('form.description')"><el-input v-model="keyForm.description" /></el-form-item>
       <el-form-item v-for="envName in selectedProvider?.requiredEnv ?? []" :key="envName" :label="envName" required>
@@ -718,19 +710,17 @@ function t(key: TranslationKey, params?: TranslationParams) {
 
   <el-dialog v-model="templateDialogVisible" :title="editingTemplateId ? t('dialog.editTemplate') : t('dialog.createTemplate')" width="760px">
     <el-form label-position="top">
-      <el-form-item :label="t('form.resourceId')"><el-input v-model="templateForm.id" :disabled="Boolean(editingTemplateId)" :placeholder="t('form.resourceIdPlaceholder')" /></el-form-item>
       <el-form-item :label="t('form.name')" required><el-input v-model="templateForm.name" /></el-form-item>
       <el-form-item :label="t('form.version')" required><el-input v-model="templateForm.version" /></el-form-item>
       <el-form-item :label="t('form.description')"><el-input v-model="templateForm.description" /></el-form-item>
       <el-form-item :label="t('form.variablesJson')" required><el-input v-model="templateForm.variablesJson" type="textarea" :rows="8" spellcheck="false" /></el-form-item>
-      <el-form-item :label="t('form.templateFilesJson')" required><el-input v-model="templateForm.filesJson" type="textarea" :rows="12" spellcheck="false" /></el-form-item>
+      <el-form-item :label="t('form.mainTf')" required><el-input v-model="templateForm.mainTf" type="textarea" :rows="12" spellcheck="false" /></el-form-item>
     </el-form>
     <template #footer><div class="dialog-footer"><el-button @click="templateDialogVisible = false">{{ t("action.cancel") }}</el-button><el-button type="primary" :loading="actionLoading" @click="saveTemplate">{{ t("action.saveTemplate") }}</el-button></div></template>
   </el-dialog>
 
   <el-dialog v-model="apiDialogVisible" :title="editingApiId ? t('dialog.editApi') : t('dialog.publishApi')" width="600px">
     <el-form label-position="top">
-      <el-form-item :label="t('form.resourceId')"><el-input v-model="apiForm.id" :disabled="Boolean(editingApiId)" :placeholder="t('form.resourceIdPlaceholder')" /></el-form-item>
       <el-form-item :label="t('form.name')" required><el-input v-model="apiForm.name" /></el-form-item>
       <el-form-item :label="t('form.key')" required><el-select v-model="apiForm.keyId"><el-option v-for="key in providerKeys" :key="key.id" :label="`${key.name} (${key.id})`" :value="key.id" /></el-select></el-form-item>
       <el-form-item :label="t('form.template')" required><el-select v-model="apiForm.templateId"><el-option v-for="template in providerTemplates" :key="template.id" :label="`${template.name} (${template.id})`" :value="template.id" /></el-select></el-form-item>

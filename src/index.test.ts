@@ -37,9 +37,8 @@ describe("Admin SPA contract", () => {
     expect(app).toContain('apis: "page.apis"');
     expect(app).toContain('runtime: "page.runtime"');
     expect(app).toContain("t('runtime.unlock')");
-    expect(app).toContain("t('form.resourceId')");
-    expect(app).toContain("t('form.templateFilesJson')");
-    expect(app).toContain("filesJson");
+    expect(app).toContain("t('form.mainTf')");
+    expect(app).toContain("mainTf");
     expect(i18n).toContain("Operations Dashboard");
     expect(i18n).toContain("憑證設定檔");
   });
@@ -87,19 +86,24 @@ describe("Admin SPA contract", () => {
     expect(app).toContain("ElMessage.error(error instanceof Error ? error.message : String(error));");
   });
 
-  it("preserves optional resource ids and full template file editing in the SPA", async () => {
+  it("uses backend-generated resource ids and preserves full template file editing in the SPA", async () => {
     const app = await Bun.file("web/src/App.vue").text();
+    const i18n = await Bun.file("web/src/i18n.ts").text();
 
     expect(app).toContain("editingKeyId");
     expect(app).toContain("editingTemplateId");
     expect(app).toContain("editingApiId");
-    expect(app).toContain("id: editingKeyId.value ? undefined : optionalText(keyForm.id)");
-    expect(app).toContain("id: editingTemplateId.value ? undefined : optionalText(templateForm.id)");
-    expect(app).toContain("id: editingApiId.value ? undefined : optionalText(apiForm.id)");
-    expect(app).toContain("t('form.resourceId')");
+    expect(app).not.toContain("optionalText(keyForm.id)");
+    expect(app).not.toContain("optionalText(templateForm.id)");
+    expect(app).not.toContain("optionalText(apiForm.id)");
+    expect(app).not.toContain("t('form.resourceId')");
+    expect(i18n).not.toContain("Resource ID");
+    expect(i18n).not.toContain("資源 ID");
     expect(await Bun.file("web/src/types.ts").text()).toContain('files: Record<string, string>');
     expect(app).toContain('fullTemplate.files');
-    expect(app).not.toContain('mainTf: templateForm.mainTf');
+    expect(app).toContain('templateFiles.value = fullTemplate.files');
+    expect(app).toContain('const files = { ...templateFiles.value, "main.tf": templateForm.mainTf };');
+    expect(app).not.toContain('filesJson');
   });
 
   it("uses only same-origin UI calls from the browser client", async () => {
