@@ -3,6 +3,17 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import { requestJson } from "./api";
+import {
+  dateLocales,
+  elementPlusLocales,
+  loadSavedLocale,
+  localeOptions,
+  saveLocale,
+  translate,
+  type LocaleKey,
+  type TranslationKey,
+  type TranslationParams,
+} from "./i18n";
 import type {
   ApiPublication,
   BootstrapResponse,
@@ -79,6 +90,7 @@ const examples = ref<RuntimeCallExample | null>(null);
 const statusResult = ref<unknown>(null);
 const outputResult = ref<unknown>(null);
 const runDetail = ref<unknown>(null);
+const currentLocale = ref<LocaleKey>(loadSavedLocale());
 
 const keyForm = reactive<KeyForm>({ id: "", name: "", description: "", env: {} });
 const templateForm = reactive<TemplateForm>({
@@ -101,23 +113,31 @@ const selectedRuntimeApi = computed(() => state.apis.find((api) => api.id === ru
 const selectedRuntimeTemplate = computed(() => selectedRuntimeApi.value?.snapshot.template);
 const deployDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("deploy"));
 const deleteDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("delete"));
+const elementLocale = computed(() => elementPlusLocales[currentLocale.value]);
+const selectedLocale = computed({
+  get: () => currentLocale.value,
+  set: (locale: LocaleKey) => {
+    currentLocale.value = locale;
+    saveLocale(locale);
+  },
+});
 
 const metrics = computed(() => [
-  { label: "Provider Types", value: state.providerTypes.length },
-  { label: "Keys", value: providerKeys.value.length },
-  { label: "Templates", value: providerTemplates.value.length },
-  { label: "Published APIs", value: providerApis.value.length },
+  { label: t("metric.providerTypes"), value: state.providerTypes.length },
+  { label: t("metric.keys"), value: providerKeys.value.length },
+  { label: t("metric.templates"), value: providerTemplates.value.length },
+  { label: t("metric.publishedApis"), value: providerApis.value.length },
 ]);
 
 const pageTitle = computed(() => {
-  const titles: Record<PageKey, string> = {
-    dashboard: "Operations Dashboard",
-    keys: "Credential Profiles",
-    templates: "Template Library",
-    apis: "Published API Contracts",
-    runtime: "Runtime Cockpit",
+  const titles: Record<PageKey, TranslationKey> = {
+    dashboard: "page.dashboard",
+    keys: "page.keys",
+    templates: "page.templates",
+    apis: "page.apis",
+    runtime: "page.runtime",
   };
-  return titles[activePage.value];
+  return t(titles[activePage.value]);
 });
 
 onMounted(() => {
@@ -161,7 +181,9 @@ function isPageKey(value: string): value is PageKey {
 }
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat("zh-Hant", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return new Intl.DateTimeFormat(dateLocales[currentLocale.value], { dateStyle: "medium", timeStyle: "short" }).format(
+    new Date(value),
+  );
 }
 
 function formatJson(value: unknown, emptyText: string) {
@@ -180,11 +202,11 @@ function openKeyDialog(key?: PublicProviderKey) {
 }
 
 async function saveKey() {
-  const provider = requireProvider();
-  const path = `/ui/providers/${encodeURIComponent(provider.id)}/keys${
-    editingKeyId.value ? `/${encodeURIComponent(editingKeyId.value)}` : ""
-  }`;
   await runAction(async () => {
+    const provider = requireProvider();
+    const path = `/ui/providers/${encodeURIComponent(provider.id)}/keys${
+      editingKeyId.value ? `/${encodeURIComponent(editingKeyId.value)}` : ""
+    }`;
     await requestJson<PublicProviderKey>(path, {
       method: "POST",
       body: JSON.stringify({
@@ -196,7 +218,7 @@ async function saveKey() {
     });
     keyDialogVisible.value = false;
     await loadBootstrap();
-    ElMessage.success("Key saved. Secret values are not returned to the browser.");
+    ElMessage.success(t("message.keySaved"));
   });
 }
 
@@ -225,7 +247,7 @@ async function saveTemplate() {
   await runAction(async () => {
     const provider = requireProvider();
     const variables = parseTemplateVariables(templateForm.variablesJson);
-    const files = parseStringRecord(templateForm.filesJson, "Template files JSON");
+    const files = parseStringRecord(templateForm.filesJson, t("form.templateFilesJson"));
     const path = `/ui/providers/${encodeURIComponent(provider.id)}/templates${
       editingTemplateId.value ? `/${encodeURIComponent(editingTemplateId.value)}` : ""
     }`;
@@ -242,7 +264,7 @@ async function saveTemplate() {
     });
     templateDialogVisible.value = false;
     await loadBootstrap();
-    ElMessage.success("Template saved and validated by the server allowlist.");
+    ElMessage.success(t("message.templateSaved"));
   });
 }
 
@@ -261,7 +283,7 @@ async function saveApi() {
   await runAction(async () => {
     const provider = requireProvider();
     if (apiForm.allowedActions.length === 0) {
-      throw new Error("Select at least one allowed action");
+      throw new Error(t("error.allowedActionRequired"));
     }
     const path = `/ui/providers/${encodeURIComponent(provider.id)}/apis${
       editingApiId.value ? `/${encodeURIComponent(editingApiId.value)}` : ""
@@ -278,13 +300,16 @@ async function saveApi() {
     });
     apiDialogVisible.value = false;
     await loadBootstrap();
-    ElMessage.success("API published. Runtime actions are available from the cockpit.");
+    ElMessage.success(t("message.apiPublished"));
   });
 }
 
 async function deleteResource(kind: ResourceKind, item: PublicProviderKey | PublicTerraformTemplate | ApiPublication) {
-  await ElMessageBox.confirm(`Delete ${item.name}?`, "Confirm delete", { type: "warning" });
   await runAction(async () => {
+    const confirmed = await confirmDelete(item.name);
+    if (!confirmed) {
+      return;
+    }
     if (kind === "key") {
       await requestJson<{ ok: true }>(
         `/ui/providers/${encodeURIComponent(item.providerTypeId)}/keys/${encodeURIComponent(item.id)}`,
@@ -299,7 +324,7 @@ async function deleteResource(kind: ResourceKind, item: PublicProviderKey | Publ
       await requestJson<{ ok: true }>(`/ui/apis/${encodeURIComponent(item.id)}`, { method: "DELETE" });
     }
     await loadBootstrap();
-    ElMessage.success("Resource deleted.");
+    ElMessage.success(t("message.resourceDeleted"));
   });
 }
 
@@ -318,76 +343,88 @@ function refreshRuntimeVars() {
 function runtimeApiChanged() {
   resetRuntimePanels();
   refreshRuntimeVars();
-  refreshExamples(false).catch(showError);
+  refreshExamples(false);
 }
 
 async function runtimeAction(action: DeploymentAction) {
   await runAction(async () => {
     const api = requireRuntimeApi();
-    const vars = parseStringRecord(runtimeVarsJson.value, "Vars JSON");
+    const vars = parseStringRecord(runtimeVarsJson.value, t("form.varsJson"));
     const result = await requestJson<TerraformRun>(`/ui/deployments/${encodeURIComponent(api.id)}/${action}`, {
       method: "POST",
       body: JSON.stringify({ vars }),
     });
     latestRun.value = result;
     runIdInput.value = result.id;
-    await refreshRuns(false);
-    ElMessage.success(`${action} finished with status ${result.status}.`);
+    await loadRuns(api, false);
+    ElMessage.success(t("message.runtimeFinished", { action, status: result.status }));
   });
 }
 
 async function refreshStatus() {
-  const api = requireRuntimeApi();
   await runAction(async () => {
+    const api = requireRuntimeApi();
     const result = await requestJson<unknown>(`/ui/deployments/${encodeURIComponent(api.id)}/status`);
     statusResult.value = result;
     if (isStatusResponse(result)) {
       latestRun.value = result.latestRun ?? null;
     }
-    ElMessage.success("Status refreshed.");
+    ElMessage.success(t("message.statusRefreshed"));
   });
 }
 
 async function refreshOutput() {
-  const api = requireRuntimeApi();
   await runAction(async () => {
+    const api = requireRuntimeApi();
     outputResult.value = await requestJson<unknown>(`/ui/deployments/${encodeURIComponent(api.id)}/output`);
-    ElMessage.success("Output refreshed.");
+    ElMessage.success(t("message.outputRefreshed"));
   });
 }
 
 async function refreshRuns(showMessage = true) {
-  const api = requireRuntimeApi();
+  await runAction(async () => {
+    const api = requireRuntimeApi();
+    await loadRuns(api, showMessage);
+  });
+}
+
+async function loadRuns(api: ApiPublication, showMessage: boolean) {
   const result = await requestJson<TerraformRun[]>(`/ui/deployments/${encodeURIComponent(api.id)}/runs`);
   runList.value = result;
   if (showMessage) {
-    ElMessage.success("Runs refreshed.");
+    ElMessage.success(t("message.runsRefreshed"));
   }
 }
 
 async function refreshExamples(showMessage = true) {
-  const api = selectedRuntimeApi.value;
-  if (!api) {
-    examples.value = null;
-    return;
-  }
+  await runAction(async () => {
+    const api = selectedRuntimeApi.value;
+    if (!api) {
+      examples.value = null;
+      return;
+    }
+    await loadExamples(api, showMessage);
+  });
+}
+
+async function loadExamples(api: ApiPublication, showMessage: boolean) {
   examples.value = await requestJson<RuntimeCallExample>(`/ui/deployments/${encodeURIComponent(api.id)}/examples`);
   if (showMessage) {
-    ElMessage.success("Examples refreshed.");
+    ElMessage.success(t("message.examplesRefreshed"));
   }
 }
 
 async function viewRun() {
-  const api = requireRuntimeApi();
-  const runId = runIdInput.value.trim();
-  if (!runId) {
-    throw new Error("Enter a run id first");
-  }
   await runAction(async () => {
+    const api = requireRuntimeApi();
+    const runId = runIdInput.value.trim();
+    if (!runId) {
+      throw new Error(t("error.runIdRequired"));
+    }
     runDetail.value = await requestJson<TerraformRun>(
       `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`,
     );
-    ElMessage.success("Run detail loaded.");
+    ElMessage.success(t("message.runDetailLoaded"));
   });
 }
 
@@ -408,14 +445,14 @@ function resetRuntimePanels() {
 
 function requireProvider(): ProviderType {
   if (!selectedProvider.value) {
-    throw new Error("Select a provider first");
+    throw new Error(t("error.selectProvider"));
   }
   return selectedProvider.value;
 }
 
 function requireRuntimeApi(): ApiPublication {
   if (!selectedRuntimeApi.value) {
-    throw new Error("Select a published API first");
+    throw new Error(t("error.selectRuntimeApi"));
   }
   return selectedRuntimeApi.value;
 }
@@ -426,28 +463,36 @@ function optionalText(value: string) {
 }
 
 function parseTemplateVariables(text: string): TemplateVariable[] {
-  const parsed = JSON.parse(text) as unknown;
+  const parsed = parseJson(text, t("form.variablesJson"));
   if (!Array.isArray(parsed)) {
-    throw new Error("Variables JSON must be an array");
+    throw new Error(t("error.variablesMustArray"));
   }
   return parsed.map((item) => {
     if (!isTemplateVariable(item)) {
-      throw new Error("Variables JSON contains an invalid variable");
+      throw new Error(t("error.invalidVariable"));
     }
     return item;
   });
 }
 
 function parseStringRecord(text: string, label: string): Record<string, string> {
-  const parsed = JSON.parse(text) as unknown;
+  const parsed = parseJson(text, label);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error(`${label} must be a JSON object`);
+    throw new Error(t("error.jsonObject", { label }));
   }
   const entries = Object.entries(parsed);
   if (!entries.every(([, value]) => typeof value === "string")) {
-    throw new Error(`${label} values must be strings`);
+    throw new Error(t("error.stringValues", { label }));
   }
   return Object.fromEntries(entries) as Record<string, string>;
+}
+
+function parseJson(text: string, label: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(t("error.invalidJson", { label }));
+  }
 }
 
 function isTemplateVariable(value: unknown): value is TemplateVariable {
@@ -481,22 +526,36 @@ async function runAction(action: () => Promise<void>) {
 function showError(error: unknown) {
   ElMessage.error(error instanceof Error ? error.message : String(error));
 }
+
+async function confirmDelete(name: string) {
+  try {
+    await ElMessageBox.confirm(t("confirm.deleteMessage", { name }), t("confirm.deleteTitle"), { type: "warning" });
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function t(key: TranslationKey, params?: TranslationParams) {
+  return translate(currentLocale.value, key, params);
+}
 </script>
 
 <template>
+  <el-config-provider :locale="elementLocale">
   <el-container class="app-shell">
     <el-aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">TP</div>
-        <h1 class="brand-title">Terraform Platform</h1>
-        <p class="brand-subtitle">Admin deployment console</p>
+        <h1 class="brand-title">{{ t("app.brand.title") }}</h1>
+        <p class="brand-subtitle">{{ t("app.brand.subtitle") }}</p>
       </div>
-      <el-menu :default-active="activePage" text-color="#d6e4ff" active-text-color="#ffffff" @select="selectPage">
-        <el-menu-item index="dashboard">Dashboard</el-menu-item>
-        <el-menu-item index="keys">Keys</el-menu-item>
-        <el-menu-item index="templates">Templates</el-menu-item>
-        <el-menu-item index="apis">Published APIs</el-menu-item>
-        <el-menu-item index="runtime">Runtime</el-menu-item>
+      <el-menu :default-active="activePage" text-color="var(--color-sidebar-text)" active-text-color="var(--color-sidebar-active)" @select="selectPage">
+        <el-menu-item index="dashboard">{{ t("nav.dashboard") }}</el-menu-item>
+        <el-menu-item index="keys">{{ t("nav.keys") }}</el-menu-item>
+        <el-menu-item index="templates">{{ t("nav.templates") }}</el-menu-item>
+        <el-menu-item index="apis">{{ t("nav.apis") }}</el-menu-item>
+        <el-menu-item index="runtime">{{ t("nav.runtime") }}</el-menu-item>
       </el-menu>
     </el-aside>
 
@@ -504,11 +563,17 @@ function showError(error: unknown) {
       <el-header class="header">
         <div class="header-title">
           <h1>{{ pageTitle }}</h1>
-          <span>Same-origin browser session for provider-scoped Terraform operations.</span>
+          <span>{{ t("header.subtitle") }}</span>
         </div>
         <el-space>
-          <el-tag type="success" effect="dark">Session authenticated</el-tag>
-          <el-button @click="logout">Logout</el-button>
+          <div class="language-control">
+            <span class="language-label">{{ t("header.language") }}</span>
+            <el-select v-model="selectedLocale" class="language-selector" size="small">
+              <el-option v-for="option in localeOptions" :key="option.key" :label="option.label" :value="option.key" />
+            </el-select>
+          </div>
+          <el-tag type="success" effect="dark">{{ t("header.authenticated") }}</el-tag>
+          <el-button @click="logout">{{ t("action.logout") }}</el-button>
         </el-space>
       </el-header>
 
@@ -516,8 +581,8 @@ function showError(error: unknown) {
         <el-card class="provider-card">
           <el-row :gutter="18" align="middle">
             <el-col :xs="24" :md="8">
-              <el-form-item label="Provider context">
-                <el-select v-model="selectedProviderId" placeholder="Select provider" @change="providerChanged">
+              <el-form-item :label="t('provider.context')">
+                <el-select v-model="selectedProviderId" :placeholder="t('provider.select')" @change="providerChanged">
                   <el-option v-for="provider in state.providerTypes" :key="provider.id" :label="`${provider.name} (${provider.id})`" :value="provider.id" />
                 </el-select>
               </el-form-item>
@@ -525,9 +590,9 @@ function showError(error: unknown) {
             <el-col :xs="24" :md="16">
               <el-alert v-if="selectedProvider" type="info" :closable="false" show-icon>
                 <template #title>{{ selectedProvider.sourceAddress }} {{ selectedProvider.versionConstraint }}</template>
-                Required env: {{ selectedProvider.requiredEnv.join(", ") }} · Actions: {{ selectedProvider.supportedActions.join(", ") }}
+                {{ t("provider.requiredEnv") }}: {{ selectedProvider.requiredEnv.join(", ") }} · {{ t("provider.actions") }}: {{ selectedProvider.supportedActions.join(", ") }}
               </el-alert>
-              <el-empty v-else description="No provider types configured." :image-size="52" />
+              <el-empty v-else :description="t('provider.empty')" :image-size="52" />
             </el-col>
           </el-row>
         </el-card>
@@ -542,95 +607,95 @@ function showError(error: unknown) {
         <el-card v-if="activePage === 'dashboard'" class="workbench-card">
           <div class="workbench-header">
             <div>
-              <h2 class="workbench-title">Resource Overview</h2>
-              <p class="workbench-copy">Create credentials, validate templates, publish API contracts, then operate runtime safely from one console.</p>
+              <h2 class="workbench-title">{{ t("dashboard.title") }}</h2>
+              <p class="workbench-copy">{{ t("dashboard.copy") }}</p>
             </div>
-            <el-button type="primary" @click="activePage = 'runtime'">Open Runtime</el-button>
+            <el-button type="primary" @click="activePage = 'runtime'">{{ t("action.openRuntime") }}</el-button>
           </div>
           <el-row :gutter="18">
-            <el-col :xs="24" :md="8"><el-alert title="Keys" :description="`${providerKeys.length} credential profiles are scoped to this provider.`" type="success" :closable="false" /></el-col>
-            <el-col :xs="24" :md="8"><el-alert title="Templates" :description="`${providerTemplates.length} templates are ready for publishing.`" type="warning" :closable="false" /></el-col>
-            <el-col :xs="24" :md="8"><el-alert title="Published APIs" :description="`${providerApis.length} APIs can be selected in Runtime.`" type="info" :closable="false" /></el-col>
+            <el-col :xs="24" :md="8"><el-alert :title="t('dashboard.keysTitle')" :description="t('dashboard.keysDescription', { count: providerKeys.length })" type="success" :closable="false" /></el-col>
+            <el-col :xs="24" :md="8"><el-alert :title="t('dashboard.templatesTitle')" :description="t('dashboard.templatesDescription', { count: providerTemplates.length })" type="warning" :closable="false" /></el-col>
+            <el-col :xs="24" :md="8"><el-alert :title="t('dashboard.apisTitle')" :description="t('dashboard.apisDescription', { count: providerApis.length })" type="info" :closable="false" /></el-col>
           </el-row>
         </el-card>
 
         <el-card v-if="activePage === 'keys'" class="workbench-card">
           <div class="workbench-header">
-            <div><h2 class="workbench-title">Keys</h2><p class="workbench-copy">Secret values are accepted once and never returned by UI responses.</p></div>
-            <el-button type="primary" @click="openKeyDialog()">Create Key</el-button>
+            <div><h2 class="workbench-title">{{ t("keys.title") }}</h2><p class="workbench-copy">{{ t("keys.copy") }}</p></div>
+            <el-button type="primary" @click="openKeyDialog()">{{ t("action.createKey") }}</el-button>
           </div>
-          <el-table :data="providerKeys" empty-text="No key resources yet." stripe>
-            <el-table-column label="Name" min-width="220"><template #default="{ row }"><div class="resource-name"><strong>{{ row.name }}</strong><small>{{ row.id }}</small></div></template></el-table-column>
-            <el-table-column label="Env Keys" min-width="260"><template #default="{ row }"><el-tag v-for="envName in row.envKeys" :key="envName" class="mr-2">{{ envName }}</el-tag></template></el-table-column>
-            <el-table-column prop="updatedAt" label="Updated" width="190"><template #default="{ row }">{{ formatDate(row.updatedAt) }}</template></el-table-column>
-            <el-table-column label="Actions" width="180" fixed="right"><template #default="{ row }"><el-button size="small" @click="openKeyDialog(row)">Edit</el-button><el-button size="small" type="danger" @click="deleteResource('key', row)">Delete</el-button></template></el-table-column>
+          <el-table :data="providerKeys" :empty-text="t('empty.keys')" stripe>
+            <el-table-column :label="t('table.name')" min-width="220"><template #default="{ row }"><div class="resource-name"><strong>{{ row.name }}</strong><small>{{ row.id }}</small></div></template></el-table-column>
+            <el-table-column :label="t('table.envKeys')" min-width="260"><template #default="{ row }"><el-tag v-for="envName in row.envKeys" :key="envName" class="mr-2">{{ envName }}</el-tag></template></el-table-column>
+            <el-table-column prop="updatedAt" :label="t('table.updated')" width="190"><template #default="{ row }">{{ formatDate(row.updatedAt) }}</template></el-table-column>
+            <el-table-column :label="t('table.actions')" width="180" fixed="right"><template #default="{ row }"><el-button size="small" @click="openKeyDialog(row)">{{ t("action.edit") }}</el-button><el-button size="small" type="danger" @click="deleteResource('key', row)">{{ t("action.delete") }}</el-button></template></el-table-column>
           </el-table>
         </el-card>
 
         <el-card v-if="activePage === 'templates'" class="workbench-card">
           <div class="workbench-header">
-            <div><h2 class="workbench-title">Templates</h2><p class="workbench-copy">Terraform content remains server-side allowlisted before it can be published.</p></div>
-            <el-button type="primary" @click="openTemplateDialog()">Create Template</el-button>
+            <div><h2 class="workbench-title">{{ t("templates.title") }}</h2><p class="workbench-copy">{{ t("templates.copy") }}</p></div>
+            <el-button type="primary" @click="openTemplateDialog()">{{ t("action.createTemplate") }}</el-button>
           </div>
-          <el-table :data="providerTemplates" empty-text="No template resources yet." stripe>
-            <el-table-column label="Name" min-width="220"><template #default="{ row }"><div class="resource-name"><strong>{{ row.name }}</strong><small>{{ row.id }} · v{{ row.version }}</small></div></template></el-table-column>
-            <el-table-column label="Variables" min-width="220"><template #default="{ row }"><el-tag v-for="variable in row.variables" :key="variable.name" :type="variable.sensitive ? 'danger' : 'info'">{{ variable.name }}</el-tag></template></el-table-column>
-            <el-table-column label="Files" min-width="180"><template #default="{ row }">{{ row.fileNames.join(", ") }}</template></el-table-column>
-            <el-table-column label="Actions" width="180" fixed="right"><template #default="{ row }"><el-button size="small" @click="openTemplateDialog(row)">Edit</el-button><el-button size="small" type="danger" @click="deleteResource('template', row)">Delete</el-button></template></el-table-column>
+          <el-table :data="providerTemplates" :empty-text="t('empty.templates')" stripe>
+            <el-table-column :label="t('table.name')" min-width="220"><template #default="{ row }"><div class="resource-name"><strong>{{ row.name }}</strong><small>{{ row.id }} · v{{ row.version }}</small></div></template></el-table-column>
+            <el-table-column :label="t('table.variables')" min-width="220"><template #default="{ row }"><el-tag v-for="variable in row.variables" :key="variable.name" :type="variable.sensitive ? 'danger' : 'info'">{{ variable.name }}</el-tag></template></el-table-column>
+            <el-table-column :label="t('table.files')" min-width="180"><template #default="{ row }">{{ row.fileNames.join(", ") }}</template></el-table-column>
+            <el-table-column :label="t('table.actions')" width="180" fixed="right"><template #default="{ row }"><el-button size="small" @click="openTemplateDialog(row)">{{ t("action.edit") }}</el-button><el-button size="small" type="danger" @click="deleteResource('template', row)">{{ t("action.delete") }}</el-button></template></el-table-column>
           </el-table>
         </el-card>
 
         <el-card v-if="activePage === 'apis'" class="workbench-card">
           <div class="workbench-header">
-            <div><h2 class="workbench-title">Published APIs</h2><p class="workbench-copy">Bind one key and one template into a versioned deployment contract.</p></div>
-            <el-button type="primary" :disabled="providerKeys.length === 0 || providerTemplates.length === 0" @click="openApiDialog()">Publish API</el-button>
+            <div><h2 class="workbench-title">{{ t("apis.title") }}</h2><p class="workbench-copy">{{ t("apis.copy") }}</p></div>
+            <el-button type="primary" :disabled="providerKeys.length === 0 || providerTemplates.length === 0" @click="openApiDialog()">{{ t("action.publishApi") }}</el-button>
           </div>
-          <el-table :data="providerApis" empty-text="No published APIs yet." stripe>
-            <el-table-column label="Name" min-width="220"><template #default="{ row }"><div class="resource-name"><strong>{{ row.name }}</strong><small>{{ row.id }}</small></div></template></el-table-column>
-            <el-table-column label="Binding" min-width="260"><template #default="{ row }">{{ row.keyId }} + {{ row.templateId }}</template></el-table-column>
-            <el-table-column label="Actions" min-width="180"><template #default="{ row }"><el-tag v-for="action in row.allowedActions" :key="action" type="success">{{ action }}</el-tag></template></el-table-column>
-            <el-table-column prop="revisionId" label="Revision" min-width="180" />
-            <el-table-column label="Manage" width="180" fixed="right"><template #default="{ row }"><el-button size="small" @click="openApiDialog(row)">Edit</el-button><el-button size="small" type="danger" @click="deleteResource('api', row)">Delete</el-button></template></el-table-column>
+          <el-table :data="providerApis" :empty-text="t('empty.apis')" stripe>
+            <el-table-column :label="t('table.name')" min-width="220"><template #default="{ row }"><div class="resource-name"><strong>{{ row.name }}</strong><small>{{ row.id }}</small></div></template></el-table-column>
+            <el-table-column :label="t('table.binding')" min-width="260"><template #default="{ row }">{{ row.keyId }} + {{ row.templateId }}</template></el-table-column>
+            <el-table-column :label="t('table.actions')" min-width="180"><template #default="{ row }"><el-tag v-for="action in row.allowedActions" :key="action" type="success">{{ action }}</el-tag></template></el-table-column>
+            <el-table-column prop="revisionId" :label="t('table.revision')" min-width="180" />
+            <el-table-column :label="t('table.manage')" width="180" fixed="right"><template #default="{ row }"><el-button size="small" @click="openApiDialog(row)">{{ t("action.edit") }}</el-button><el-button size="small" type="danger" @click="deleteResource('api', row)">{{ t("action.delete") }}</el-button></template></el-table-column>
           </el-table>
         </el-card>
 
         <el-card v-if="activePage === 'runtime'" class="workbench-card">
           <div class="workbench-header">
-            <div><h2 class="workbench-title">Runtime</h2><p class="workbench-copy">Deploy, delete, inspect status/output, and review run history for a published API.</p></div>
+            <div><h2 class="workbench-title">{{ t("runtime.title") }}</h2><p class="workbench-copy">{{ t("runtime.copy") }}</p></div>
           </div>
-          <el-empty v-if="providerApis.length === 0" description="Publish an API to unlock runtime actions." />
+          <el-empty v-if="providerApis.length === 0" :description="t('runtime.unlock')" />
           <div v-else class="runtime-grid">
             <el-card shadow="never">
               <el-form label-position="top">
-                <el-form-item label="API">
+                <el-form-item :label="t('form.api')">
                   <el-select v-model="runtimeApiId" @change="runtimeApiChanged">
                     <el-option v-for="api in providerApis" :key="api.id" :label="`${api.name} (${api.id})`" :value="api.id" />
                   </el-select>
                 </el-form-item>
-                <el-form-item label="Vars JSON">
+                <el-form-item :label="t('form.varsJson')">
                   <el-input v-model="runtimeVarsJson" type="textarea" :rows="12" spellcheck="false" />
                 </el-form-item>
                 <el-space wrap>
-                  <el-button type="primary" :disabled="deployDisabled" :loading="actionLoading" @click="runtimeAction('deploy')">Deploy</el-button>
-                  <el-button type="danger" :disabled="deleteDisabled" :loading="actionLoading" @click="runtimeAction('delete')">Terraform Delete</el-button>
-                  <el-button :disabled="!selectedRuntimeApi" @click="refreshStatus">Status</el-button>
-                  <el-button :disabled="!selectedRuntimeApi" @click="refreshOutput">Output</el-button>
-                  <el-button :disabled="!selectedRuntimeApi" @click="refreshRuns(true)">Runs</el-button>
-                  <el-button :disabled="!selectedRuntimeApi" @click="refreshExamples(true)">Examples</el-button>
+                  <el-button type="primary" :disabled="deployDisabled" :loading="actionLoading" @click="runtimeAction('deploy')">{{ t("action.deploy") }}</el-button>
+                  <el-button type="danger" :disabled="deleteDisabled" :loading="actionLoading" @click="runtimeAction('delete')">{{ t("action.terraformDelete") }}</el-button>
+                  <el-button :disabled="!selectedRuntimeApi" @click="refreshStatus">{{ t("action.status") }}</el-button>
+                  <el-button :disabled="!selectedRuntimeApi" @click="refreshOutput">{{ t("action.output") }}</el-button>
+                  <el-button :disabled="!selectedRuntimeApi" @click="refreshRuns(true)">{{ t("action.runs") }}</el-button>
+                  <el-button :disabled="!selectedRuntimeApi" @click="refreshExamples(true)">{{ t("action.examples") }}</el-button>
                 </el-space>
                 <el-divider />
-                <el-form-item label="Run ID">
-                  <el-input v-model="runIdInput" placeholder="paste run id"><template #append><el-button :disabled="!selectedRuntimeApi" @click="viewRun">View Run</el-button></template></el-input>
+                <el-form-item :label="t('form.runId')">
+                  <el-input v-model="runIdInput" :placeholder="t('form.runIdPlaceholder')"><template #append><el-button :disabled="!selectedRuntimeApi" @click="viewRun">{{ t("action.viewRun") }}</el-button></template></el-input>
                 </el-form-item>
               </el-form>
             </el-card>
             <div class="runtime-panels">
-              <el-card shadow="never"><template #header>Latest Run</template><pre class="code-panel">{{ formatJson(latestRun, "No run yet.") }}</pre></el-card>
-              <el-card shadow="never"><template #header>Run List</template><pre class="code-panel">{{ formatJson(runList, "No runs loaded.") }}</pre></el-card>
-              <el-card shadow="never"><template #header>External Call Examples</template><pre class="code-panel">{{ formatJson(examples, "No examples loaded.") }}</pre></el-card>
-              <el-card shadow="never"><template #header>Status</template><pre class="code-panel">{{ formatJson(statusResult, "No status loaded.") }}</pre></el-card>
-              <el-card shadow="never"><template #header>Output</template><pre class="code-panel">{{ formatJson(outputResult, "No output loaded.") }}</pre></el-card>
-              <el-card shadow="never"><template #header>Run Detail</template><pre class="code-panel">{{ formatJson(runDetail, "No run detail loaded.") }}</pre></el-card>
+              <el-card shadow="never"><template #header>{{ t("panel.latestRun") }}</template><pre class="code-panel">{{ formatJson(latestRun, t("empty.latestRun")) }}</pre></el-card>
+              <el-card shadow="never"><template #header>{{ t("panel.runList") }}</template><pre class="code-panel">{{ formatJson(runList, t("empty.runList")) }}</pre></el-card>
+              <el-card shadow="never"><template #header>{{ t("panel.externalExamples") }}</template><pre class="code-panel">{{ formatJson(examples, t("empty.examples")) }}</pre></el-card>
+              <el-card shadow="never"><template #header>{{ t("panel.status") }}</template><pre class="code-panel">{{ formatJson(statusResult, t("empty.status")) }}</pre></el-card>
+              <el-card shadow="never"><template #header>{{ t("panel.output") }}</template><pre class="code-panel">{{ formatJson(outputResult, t("empty.output")) }}</pre></el-card>
+              <el-card shadow="never"><template #header>{{ t("panel.runDetail") }}</template><pre class="code-panel">{{ formatJson(runDetail, t("empty.runDetail")) }}</pre></el-card>
             </div>
           </div>
         </el-card>
@@ -638,39 +703,40 @@ function showError(error: unknown) {
     </el-container>
   </el-container>
 
-  <el-dialog v-model="keyDialogVisible" :title="editingKeyId ? 'Edit Key' : 'Create Key'" width="560px">
-    <el-alert v-if="editingKeySecrets" class="form-tip" title="Secret values are never returned. Re-enter every required secret before saving this key." type="warning" show-icon :closable="false" />
+  <el-dialog v-model="keyDialogVisible" :title="editingKeyId ? t('dialog.editKey') : t('dialog.createKey')" width="560px">
+    <el-alert v-if="editingKeySecrets" class="form-tip" :title="t('dialog.secretTip')" type="warning" show-icon :closable="false" />
     <el-form label-position="top">
-      <el-form-item label="Resource ID"><el-input v-model="keyForm.id" :disabled="Boolean(editingKeyId)" placeholder="Optional; generated when blank" /></el-form-item>
-      <el-form-item label="Name" required><el-input v-model="keyForm.name" /></el-form-item>
-      <el-form-item label="Description"><el-input v-model="keyForm.description" /></el-form-item>
+      <el-form-item :label="t('form.resourceId')"><el-input v-model="keyForm.id" :disabled="Boolean(editingKeyId)" :placeholder="t('form.resourceIdPlaceholder')" /></el-form-item>
+      <el-form-item :label="t('form.name')" required><el-input v-model="keyForm.name" /></el-form-item>
+      <el-form-item :label="t('form.description')"><el-input v-model="keyForm.description" /></el-form-item>
       <el-form-item v-for="envName in selectedProvider?.requiredEnv ?? []" :key="envName" :label="envName" required>
         <el-input v-model="keyForm.env[envName]" type="password" autocomplete="off" show-password />
       </el-form-item>
     </el-form>
-    <template #footer><div class="dialog-footer"><el-button @click="keyDialogVisible = false">Cancel</el-button><el-button type="primary" :loading="actionLoading" @click="saveKey">Save Key</el-button></div></template>
+    <template #footer><div class="dialog-footer"><el-button @click="keyDialogVisible = false">{{ t("action.cancel") }}</el-button><el-button type="primary" :loading="actionLoading" @click="saveKey">{{ t("action.saveKey") }}</el-button></div></template>
   </el-dialog>
 
-  <el-dialog v-model="templateDialogVisible" :title="editingTemplateId ? 'Edit Template' : 'Create Template'" width="760px">
+  <el-dialog v-model="templateDialogVisible" :title="editingTemplateId ? t('dialog.editTemplate') : t('dialog.createTemplate')" width="760px">
     <el-form label-position="top">
-      <el-form-item label="Resource ID"><el-input v-model="templateForm.id" :disabled="Boolean(editingTemplateId)" placeholder="Optional; generated when blank" /></el-form-item>
-      <el-form-item label="Name" required><el-input v-model="templateForm.name" /></el-form-item>
-      <el-form-item label="Version" required><el-input v-model="templateForm.version" /></el-form-item>
-      <el-form-item label="Description"><el-input v-model="templateForm.description" /></el-form-item>
-      <el-form-item label="Variables JSON" required><el-input v-model="templateForm.variablesJson" type="textarea" :rows="8" spellcheck="false" /></el-form-item>
-      <el-form-item label="Template files JSON" required><el-input v-model="templateForm.filesJson" type="textarea" :rows="12" spellcheck="false" /></el-form-item>
+      <el-form-item :label="t('form.resourceId')"><el-input v-model="templateForm.id" :disabled="Boolean(editingTemplateId)" :placeholder="t('form.resourceIdPlaceholder')" /></el-form-item>
+      <el-form-item :label="t('form.name')" required><el-input v-model="templateForm.name" /></el-form-item>
+      <el-form-item :label="t('form.version')" required><el-input v-model="templateForm.version" /></el-form-item>
+      <el-form-item :label="t('form.description')"><el-input v-model="templateForm.description" /></el-form-item>
+      <el-form-item :label="t('form.variablesJson')" required><el-input v-model="templateForm.variablesJson" type="textarea" :rows="8" spellcheck="false" /></el-form-item>
+      <el-form-item :label="t('form.templateFilesJson')" required><el-input v-model="templateForm.filesJson" type="textarea" :rows="12" spellcheck="false" /></el-form-item>
     </el-form>
-    <template #footer><div class="dialog-footer"><el-button @click="templateDialogVisible = false">Cancel</el-button><el-button type="primary" :loading="actionLoading" @click="saveTemplate">Save Template</el-button></div></template>
+    <template #footer><div class="dialog-footer"><el-button @click="templateDialogVisible = false">{{ t("action.cancel") }}</el-button><el-button type="primary" :loading="actionLoading" @click="saveTemplate">{{ t("action.saveTemplate") }}</el-button></div></template>
   </el-dialog>
 
-  <el-dialog v-model="apiDialogVisible" :title="editingApiId ? 'Edit API' : 'Publish API'" width="600px">
+  <el-dialog v-model="apiDialogVisible" :title="editingApiId ? t('dialog.editApi') : t('dialog.publishApi')" width="600px">
     <el-form label-position="top">
-      <el-form-item label="Resource ID"><el-input v-model="apiForm.id" :disabled="Boolean(editingApiId)" placeholder="Optional; generated when blank" /></el-form-item>
-      <el-form-item label="Name" required><el-input v-model="apiForm.name" /></el-form-item>
-      <el-form-item label="Key" required><el-select v-model="apiForm.keyId"><el-option v-for="key in providerKeys" :key="key.id" :label="`${key.name} (${key.id})`" :value="key.id" /></el-select></el-form-item>
-      <el-form-item label="Template" required><el-select v-model="apiForm.templateId"><el-option v-for="template in providerTemplates" :key="template.id" :label="`${template.name} (${template.id})`" :value="template.id" /></el-select></el-form-item>
-      <el-form-item label="Allowed Actions" required><el-checkbox-group v-model="apiForm.allowedActions"><el-checkbox-button v-for="action in selectedProvider?.supportedActions ?? []" :key="action" :label="action" /></el-checkbox-group></el-form-item>
+      <el-form-item :label="t('form.resourceId')"><el-input v-model="apiForm.id" :disabled="Boolean(editingApiId)" :placeholder="t('form.resourceIdPlaceholder')" /></el-form-item>
+      <el-form-item :label="t('form.name')" required><el-input v-model="apiForm.name" /></el-form-item>
+      <el-form-item :label="t('form.key')" required><el-select v-model="apiForm.keyId"><el-option v-for="key in providerKeys" :key="key.id" :label="`${key.name} (${key.id})`" :value="key.id" /></el-select></el-form-item>
+      <el-form-item :label="t('form.template')" required><el-select v-model="apiForm.templateId"><el-option v-for="template in providerTemplates" :key="template.id" :label="`${template.name} (${template.id})`" :value="template.id" /></el-select></el-form-item>
+      <el-form-item :label="t('form.allowedActions')" required><el-checkbox-group v-model="apiForm.allowedActions"><el-checkbox-button v-for="action in selectedProvider?.supportedActions ?? []" :key="action" :label="action" /></el-checkbox-group></el-form-item>
     </el-form>
-    <template #footer><div class="dialog-footer"><el-button @click="apiDialogVisible = false">Cancel</el-button><el-button type="primary" :loading="actionLoading" @click="saveApi">Publish API</el-button></div></template>
+    <template #footer><div class="dialog-footer"><el-button @click="apiDialogVisible = false">{{ t("action.cancel") }}</el-button><el-button type="primary" :loading="actionLoading" @click="saveApi">{{ t("action.publishApi") }}</el-button></div></template>
   </el-dialog>
+  </el-config-provider>
 </template>

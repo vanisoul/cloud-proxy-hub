@@ -27,18 +27,64 @@ describe("Admin SPA contract", () => {
     const html = await Bun.file("web/index.html").text();
     const app = await Bun.file("web/src/App.vue").text();
     const main = await Bun.file("web/src/main.ts").text();
+    const i18n = await Bun.file("web/src/i18n.ts").text();
 
     expect(html).toContain('<div id="app"></div>');
     expect(main).toContain('import ElementPlus from "element-plus"');
-    expect(app).toContain("Operations Dashboard");
-    expect(app).toContain("Credential Profiles");
-    expect(app).toContain("Template Library");
-    expect(app).toContain("Published API Contracts");
-    expect(app).toContain("Runtime Cockpit");
-    expect(app).toContain("Publish an API to unlock runtime actions.");
-    expect(app).toContain("Resource ID");
-    expect(app).toContain("Template files JSON");
+    expect(app).toContain('dashboard: "page.dashboard"');
+    expect(app).toContain('keys: "page.keys"');
+    expect(app).toContain('templates: "page.templates"');
+    expect(app).toContain('apis: "page.apis"');
+    expect(app).toContain('runtime: "page.runtime"');
+    expect(app).toContain("t('runtime.unlock')");
+    expect(app).toContain("t('form.resourceId')");
+    expect(app).toContain("t('form.templateFilesJson')");
     expect(app).toContain("filesJson");
+    expect(i18n).toContain("Operations Dashboard");
+    expect(i18n).toContain("憑證設定檔");
+  });
+
+  it("adds dependency-free SPA i18n and Element Plus locale switching", async () => {
+    const app = await Bun.file("web/src/App.vue").text();
+    const i18n = await Bun.file("web/src/i18n.ts").text();
+
+    expect(i18n).toContain("export type LocaleKey");
+    expect(i18n).toContain("localeOptions");
+    expect(i18n).toContain('key: "en"');
+    expect(i18n).toContain('key: "zh-Hant"');
+    expect(i18n).toContain('element-plus/es/locale/lang/en');
+    expect(i18n).toContain('element-plus/es/locale/lang/zh-tw');
+    expect(i18n).toContain("elementPlusLocales");
+    expect(i18n).toContain("localeStorageKey");
+    expect(i18n).toContain("function normalizeLocale");
+    expect(i18n).toContain("function loadSavedLocale");
+    expect(i18n).toContain("function saveLocale");
+    expect(app).toContain('<el-config-provider :locale="elementLocale">');
+    expect(app).toContain('v-model="selectedLocale"');
+    expect(app).toContain('class="language-selector"');
+    expect(app).toContain("localeOptions");
+    expect(app).toContain("loadSavedLocale()");
+    expect(app).toContain("saveLocale(locale)");
+  });
+
+  it("guards SPA operation validation errors behind localized Element Plus messages", async () => {
+    const app = await Bun.file("web/src/App.vue").text();
+
+    expect(app).toContain("async function saveKey() {\n  await runAction(async () => {\n    const provider = requireProvider();");
+    expect(app).toContain("async function refreshStatus() {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
+    expect(app).toContain("async function refreshOutput() {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
+    expect(app).toContain("async function refreshRuns(showMessage = true) {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
+    expect(app).toContain("async function viewRun() {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
+    expect(app).toContain('throw new Error(t("error.allowedActionRequired"))');
+    expect(app).toContain('throw new Error(t("error.runIdRequired"))');
+    expect(app).toContain('throw new Error(t("error.selectProvider"))');
+    expect(app).toContain('throw new Error(t("error.selectRuntimeApi"))');
+    expect(app).toContain('parseStringRecord(runtimeVarsJson.value, t("form.varsJson"))');
+    expect(app).toContain('return JSON.parse(text);');
+    expect(app).toContain('throw new Error(t("error.invalidJson", { label }));');
+    expect(app).toContain("const confirmed = await confirmDelete(item.name);");
+    expect(app).toContain("} catch (error) {");
+    expect(app).toContain("ElMessage.error(error instanceof Error ? error.message : String(error));");
   });
 
   it("preserves optional resource ids and full template file editing in the SPA", async () => {
@@ -50,6 +96,7 @@ describe("Admin SPA contract", () => {
     expect(app).toContain("id: editingKeyId.value ? undefined : optionalText(keyForm.id)");
     expect(app).toContain("id: editingTemplateId.value ? undefined : optionalText(templateForm.id)");
     expect(app).toContain("id: editingApiId.value ? undefined : optionalText(apiForm.id)");
+    expect(app).toContain("t('form.resourceId')");
     expect(await Bun.file("web/src/types.ts").text()).toContain('files: Record<string, string>');
     expect(app).toContain('fullTemplate.files');
     expect(app).not.toContain('mainTf: templateForm.mainTf');
