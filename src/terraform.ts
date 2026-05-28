@@ -139,6 +139,7 @@ export class TerraformService {
       };
 
       await this.store.saveRun(run);
+      await this.store.appendRunEvent(run.apiId, run.id, { type: "queued", message: `${action} queued` });
       return await this.execute(run, api, executionVars);
     } finally {
       this.activeApiRuns.delete(api.id);
@@ -155,7 +156,10 @@ export class TerraformService {
     const key = await this.store.getKey(api.providerTypeId, api.keyId);
     const workDir = this.store.terraformPath(run.apiId);
     const secrets = [...Object.values(key.env), ...Object.values(executionVars)];
+    const runningRun: TerraformRun = { ...run, status: "running", updatedAt: new Date().toISOString() };
 
+    await this.store.saveRun(runningRun);
+    await this.store.appendRunEvent(run.apiId, run.id, { type: "running", message: `${run.action} started` });
     await mkdir(workDir, { recursive: true });
     await cleanManagedTerraformFiles(workDir);
     await Promise.all(
@@ -188,25 +192,59 @@ export class TerraformService {
 
     const env = terraformEnv(key.env);
     const commandResults: TerraformCommandResult[] = [];
-    const init = await runTerraform(["init", "-input=false"], workDir, env);
+    const init = await this.runCommand(run, "init", ["init", "-input=false"], workDir, env, secrets);
     commandResults.push(toCommandResult("init", init, secrets));
     if (init.exitCode !== 0) {
-      return this.fail(run, init.exitCode, init.output, secrets, commandResults);
+      return this.fail(runningRun, init.exitCode, init.output, secrets, commandResults);
     }
 
-    const validate = await runTerraform(["validate", "-no-color"], workDir, env);
+    const validate = await this.runCommand(run, "validate", ["validate", "-no-color"], workDir, env, secrets);
     commandResults.push(toCommandResult("validate", validate, secrets));
     if (validate.exitCode !== 0) {
-      return this.fail(run, validate.exitCode, validate.output, secrets, commandResults);
+      return this.fail(runningRun, validate.exitCode, validate.output, secrets, commandResults);
     }
 
-    const action = await runTerraform(terraformArgs(run.action), workDir, env);
+    const actionStep = run.action === "deploy" ? "apply" : "destroy";
+    const action = await this.runCommand(run, actionStep, terraformArgs(run.action), workDir, env, secrets);
     const redactedOutput = redactSecrets(action.output, secrets);
-    commandResults.push(toCommandResult(run.action === "deploy" ? "apply" : "destroy", action, secrets));
-    const updated = updateRun(run, action.exitCode === 0 ? "succeeded" : "failed", action.exitCode, redactedOutput, commandResults);
+    commandResults.push(toCommandResult(actionStep, action, secrets));
+    const updated = updateRun(
+      runningRun,
+      action.exitCode === 0 ? "succeeded" : "failed",
+      action.exitCode,
+      redactedOutput,
+      commandResults,
+    );
     await writeFile(this.store.runPath(run.apiId, run.id, "logs.redacted.txt"), redactedOutput, { mode: 0o600 });
     await this.store.saveRun(updated);
+    await this.store.appendRunEvent(run.apiId, run.id, {
+      type: updated.status === "succeeded" ? "succeeded" : "failed",
+      exitCode: action.exitCode,
+      message: `${run.action} ${updated.status}`,
+      output: redactedOutput,
+    });
     return updated;
+  }
+
+  private async runCommand(
+    run: TerraformRun,
+    step: TerraformCommandResult["step"],
+    args: string[],
+    workDir: string,
+    env: Record<string, string | undefined>,
+    secrets: string[],
+  ) {
+    const message = `terraform ${args.join(" ")}`;
+    await this.store.appendRunEvent(run.apiId, run.id, { type: "command_started", step, message });
+    const result = await runTerraform(args, workDir, env);
+    await this.store.appendRunEvent(run.apiId, run.id, {
+      type: "command_finished",
+      step,
+      exitCode: result.exitCode,
+      message,
+      output: redactSecrets(result.output, secrets),
+    });
+    return result;
   }
 
   private async fail(
@@ -220,6 +258,12 @@ export class TerraformService {
     const failed = updateRun(run, "failed", exitCode, redactedOutput, commandResults);
     await writeFile(this.store.runPath(run.apiId, run.id, "logs.redacted.txt"), redactedOutput, { mode: 0o600 });
     await this.store.saveRun(failed);
+    await this.store.appendRunEvent(run.apiId, run.id, {
+      type: "failed",
+      exitCode,
+      message: `${run.action} failed`,
+      output: redactedOutput,
+    });
     return failed;
   }
 }

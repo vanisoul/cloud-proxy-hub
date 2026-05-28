@@ -29,6 +29,7 @@ import type {
 
 type PageKey = "dashboard" | "keys" | "templates" | "apis" | "runtime";
 type ResourceKind = "key" | "template" | "api";
+type ElementTagType = "primary" | "success" | "warning" | "danger" | "info";
 
 type KeyForm = {
   name: string;
@@ -81,12 +82,12 @@ const editingApiId = ref("");
 const runtimeApiId = ref("");
 const runtimeVarsJson = ref("{}");
 const runIdInput = ref("");
-const latestRun = ref<unknown>(null);
-const runList = ref<unknown>(null);
+const latestRun = ref<TerraformRun | null>(null);
+const runList = ref<TerraformRun[] | null>(null);
 const examples = ref<RuntimeCallExample | null>(null);
 const statusResult = ref<unknown>(null);
 const outputResult = ref<unknown>(null);
-const runDetail = ref<unknown>(null);
+const runDetail = ref<TerraformRun | null>(null);
 const currentLocale = ref<LocaleKey>(loadSavedLocale());
 const templateFiles = ref<Record<string, string>>({ "main.tf": sampleTemplate });
 
@@ -110,6 +111,16 @@ const selectedRuntimeApi = computed(() => state.apis.find((api) => api.id === ru
 const selectedRuntimeTemplate = computed(() => selectedRuntimeApi.value?.snapshot.template);
 const deployDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("deploy"));
 const deleteDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("delete"));
+const runtimeWorkdirHint = computed(
+  () => runDetail.value?.workdir ?? latestRun.value?.workdir ?? selectedRuntimeApi.value?.id ?? "",
+);
+const runtimeExecutionAreaHint = computed(() => {
+  const api = selectedRuntimeApi.value;
+  if (!api) {
+    return "";
+  }
+  return t("runtime.executionAreaHint", { apiId: api.id, workdir: runtimeWorkdirHint.value });
+});
 const elementLocale = computed(() => elementPlusLocales[currentLocale.value]);
 const selectedLocale = computed({
   get: () => currentLocale.value,
@@ -185,6 +196,30 @@ function formatDate(value: string) {
 
 function formatJson(value: unknown, emptyText: string) {
   return value === null || value === undefined ? emptyText : JSON.stringify(value, null, 2);
+}
+
+function formatExitCode(exitCode: number | undefined) {
+  return exitCode ?? t("runtime.exitPending");
+}
+
+function runStatusType(status: TerraformRun["status"]): ElementTagType {
+  if (status === "succeeded") {
+    return "success";
+  }
+  if (status === "failed") {
+    return "danger";
+  }
+  if (status === "needs_attention") {
+    return "warning";
+  }
+  return "info";
+}
+
+function exitCodeStatusType(exitCode: number | undefined): ElementTagType {
+  if (exitCode === undefined) {
+    return "info";
+  }
+  return exitCode === 0 ? "success" : "danger";
 }
 
 function openKeyDialog(key?: PublicProviderKey) {
@@ -407,18 +442,23 @@ async function loadExamples(api: ApiPublication, showMessage: boolean) {
   }
 }
 
-async function viewRun() {
+async function viewRun(runIdOverride?: string) {
   await runAction(async () => {
     const api = requireRuntimeApi();
-    const runId = runIdInput.value.trim();
+    const runId = (runIdOverride ?? runIdInput.value).trim();
     if (!runId) {
       throw new Error(t("error.runIdRequired"));
     }
+    runIdInput.value = runId;
     runDetail.value = await requestJson<TerraformRun>(
       `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`,
     );
     ElMessage.success(t("message.runDetailLoaded"));
   });
+}
+
+function selectRun(row: TerraformRun) {
+  void viewRun(row.id);
 }
 
 async function logout() {
@@ -665,6 +705,10 @@ function t(key: TranslationKey, params?: TranslationParams) {
                     <el-option v-for="api in providerApis" :key="api.id" :label="`${api.name} (${api.id})`" :value="api.id" />
                   </el-select>
                 </el-form-item>
+                <el-alert v-if="selectedRuntimeApi" class="form-tip" type="info" :closable="false" show-icon>
+                  <template #title>{{ t("runtime.executionArea") }}</template>
+                  {{ runtimeExecutionAreaHint }}
+                </el-alert>
                 <el-form-item :label="t('form.varsJson')">
                   <el-input v-model="runtimeVarsJson" type="textarea" :rows="12" spellcheck="false" />
                 </el-form-item>
@@ -684,11 +728,49 @@ function t(key: TranslationKey, params?: TranslationParams) {
             </el-card>
             <div class="runtime-panels">
               <el-card shadow="never"><template #header>{{ t("panel.latestRun") }}</template><pre class="code-panel">{{ formatJson(latestRun, t("empty.latestRun")) }}</pre></el-card>
-              <el-card shadow="never"><template #header>{{ t("panel.runList") }}</template><pre class="code-panel">{{ formatJson(runList, t("empty.runList")) }}</pre></el-card>
+              <el-card shadow="never">
+                <template #header>{{ t("panel.runHistory") }}</template>
+                <el-table :data="runList ?? []" :empty-text="t('empty.runList')" stripe highlight-current-row @row-click="selectRun">
+                  <el-table-column prop="createdAt" :label="t('table.created')" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
+                  <el-table-column prop="action" :label="t('table.action')" width="110"><template #default="{ row }"><el-tag type="primary">{{ row.action }}</el-tag></template></el-table-column>
+                  <el-table-column prop="status" :label="t('table.status')" width="150"><template #default="{ row }"><el-tag :type="runStatusType(row.status)">{{ row.status }}</el-tag></template></el-table-column>
+                  <el-table-column prop="exitCode" :label="t('table.exitCode')" width="110"><template #default="{ row }"><el-tag :type="exitCodeStatusType(row.exitCode)">{{ formatExitCode(row.exitCode) }}</el-tag></template></el-table-column>
+                  <el-table-column :label="t('table.revisionRun')" min-width="240"><template #default="{ row }"><div class="resource-name"><strong>{{ row.apiRevisionId }}</strong><small>{{ row.id }}</small></div></template></el-table-column>
+                  <el-table-column :label="t('table.actions')" width="120" fixed="right"><template #default="{ row }"><el-button size="small" @click.stop="viewRun(row.id)">{{ t("action.viewRun") }}</el-button></template></el-table-column>
+                </el-table>
+              </el-card>
               <el-card shadow="never"><template #header>{{ t("panel.externalExamples") }}</template><pre class="code-panel">{{ formatJson(examples, t("empty.examples")) }}</pre></el-card>
               <el-card shadow="never"><template #header>{{ t("panel.status") }}</template><pre class="code-panel">{{ formatJson(statusResult, t("empty.status")) }}</pre></el-card>
               <el-card shadow="never"><template #header>{{ t("panel.output") }}</template><pre class="code-panel">{{ formatJson(outputResult, t("empty.output")) }}</pre></el-card>
-              <el-card shadow="never"><template #header>{{ t("panel.runDetail") }}</template><pre class="code-panel">{{ formatJson(runDetail, t("empty.runDetail")) }}</pre></el-card>
+              <el-card shadow="never">
+                <template #header>{{ t("panel.runDetail") }}</template>
+                <template v-if="runDetail">
+                  <el-descriptions :column="2" border>
+                    <el-descriptions-item :label="t('table.runId')">{{ runDetail.id }}</el-descriptions-item>
+                    <el-descriptions-item :label="t('table.revision')">{{ runDetail.apiRevisionId }}</el-descriptions-item>
+                    <el-descriptions-item :label="t('table.action')">{{ runDetail.action }}</el-descriptions-item>
+                    <el-descriptions-item :label="t('table.status')"><el-tag :type="runStatusType(runDetail.status)">{{ runDetail.status }}</el-tag></el-descriptions-item>
+                    <el-descriptions-item :label="t('table.exitCode')"><el-tag :type="exitCodeStatusType(runDetail.exitCode)">{{ formatExitCode(runDetail.exitCode) }}</el-tag></el-descriptions-item>
+                    <el-descriptions-item :label="t('table.created')">{{ formatDate(runDetail.createdAt) }}</el-descriptions-item>
+                    <el-descriptions-item :label="t('runtime.workdir')" :span="2">{{ runDetail.workdir ?? runtimeWorkdirHint }}</el-descriptions-item>
+                  </el-descriptions>
+                  <el-divider />
+                  <el-empty v-if="!runDetail.commandResults?.length" :description="t('empty.commandResults')" :image-size="52" />
+                  <template v-else>
+                    <div v-for="(result, index) in runDetail.commandResults" :key="`${result.step}-${index}`" class="runtime-command-result">
+                      <div class="workbench-header">
+                        <div>
+                          <h3 class="workbench-title">{{ result.step }}</h3>
+                          <p class="workbench-copy">{{ t("runtime.commandStatus", { status: result.exitCode === 0 ? t("runtime.commandSucceeded") : t("runtime.commandFailed"), exitCode: result.exitCode }) }}</p>
+                        </div>
+                        <el-tag :type="exitCodeStatusType(result.exitCode)">{{ formatExitCode(result.exitCode) }}</el-tag>
+                      </div>
+                      <pre class="code-panel command-output">{{ result.output }}</pre>
+                    </div>
+                  </template>
+                </template>
+                <el-empty v-else :description="t('empty.runDetail')" :image-size="52" />
+              </el-card>
             </div>
           </div>
         </el-card>

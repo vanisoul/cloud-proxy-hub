@@ -73,7 +73,7 @@ describe("Admin SPA contract", () => {
     expect(app).toContain("async function refreshStatus() {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
     expect(app).toContain("async function refreshOutput() {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
     expect(app).toContain("async function refreshRuns(showMessage = true) {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
-    expect(app).toContain("async function viewRun() {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
+    expect(app).toContain("async function viewRun(runIdOverride?: string) {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
     expect(app).toContain('throw new Error(t("error.allowedActionRequired"))');
     expect(app).toContain('throw new Error(t("error.runIdRequired"))');
     expect(app).toContain('throw new Error(t("error.selectProvider"))');
@@ -117,6 +117,23 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(webSource).toContain("/ui/deployments/");
     expect(webSource).not.toContain("ADMIN_API_KEY");
     expect(webSource).not.toContain("authorization");
+  });
+
+  it("defines runtime history, CLI output, and redacted event routes", async () => {
+    const app = await Bun.file("web/src/App.vue").text();
+    const server = await Bun.file("src/index.ts").text();
+    const storage = await Bun.file("src/storage.ts").text();
+
+    expect(app).toContain('const runList = ref<TerraformRun[] | null>(null);');
+    expect(app).toContain('<el-table :data="runList ?? []"');
+    expect(app).toContain('t("panel.runHistory")');
+    expect(app).toContain('class="code-panel command-output"');
+    expect(app).toContain('runtime.executionAreaHint');
+    expect(server).toContain('"/ui/deployments/:apiId/runs/:runId/events"');
+    expect(server).toContain('"/api/deployments/:apiId/runs/:runId/events"');
+    expect(server).toContain('"/ui/deployments/:apiId/runs/:runId/events/stream"');
+    expect(server).toContain('"content-type": "text/event-stream; charset=utf-8"');
+    expect(storage).toContain('events.redacted.ndjson');
   });
 
   it("redirects unauthenticated root requests to login", async () => {

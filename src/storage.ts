@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, normalize, relative } from "node:path";
 
 import { appConfig, builtInProviderTypes } from "@/config";
@@ -12,12 +12,14 @@ import type {
   PublicTerraformTemplate,
   RuntimeCallExample,
   TerraformRun,
+  TerraformRunEvent,
   TerraformTemplate,
   TerraformTemplateInput,
 } from "@/types";
 
 type KeyInput = Omit<ProviderKey, "createdAt" | "updatedAt" | "id"> & { id?: string };
 type ApiInput = Omit<ApiPublication, "createdAt" | "updatedAt" | "id" | "revisionId" | "snapshot"> & { id?: string };
+type RunEventInput = Omit<TerraformRunEvent, "id" | "apiId" | "runId" | "createdAt">;
 
 export class PlatformStore {
   async initialize() {
@@ -209,6 +211,35 @@ export class PlatformStore {
 
   async getRun(apiId: string, runId: string): Promise<TerraformRun> {
     return this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"));
+  }
+
+  async appendRunEvent(apiId: string, runId: string, eventInput: RunEventInput): Promise<TerraformRunEvent> {
+    const event: TerraformRunEvent = {
+      ...eventInput,
+      id: uuidV7(),
+      apiId,
+      runId,
+      createdAt: new Date().toISOString(),
+    };
+    const eventPath = this.runPath(apiId, runId, "events.redacted.ndjson");
+    await mkdir(dirname(eventPath), { recursive: true });
+    await appendFile(eventPath, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+    return event;
+  }
+
+  async listRunEvents(apiId: string, runId: string): Promise<TerraformRunEvent[]> {
+    try {
+      const content = await readFile(this.runPath(apiId, runId, "events.redacted.ndjson"), "utf8");
+      return content
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as TerraformRunEvent);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
   }
 
   async listRuns(apiId: string): Promise<TerraformRun[]> {

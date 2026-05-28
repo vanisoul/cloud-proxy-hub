@@ -229,6 +229,29 @@ describe("PlatformStore", () => {
     expect(JSON.stringify(runs)).not.toContain("super-secret");
   });
 
+  it("stores redacted run events as ordered multiline NDJSON", async () => {
+    await createConfigFixture();
+
+    expect(await store.listRunEvents("safe-api", "missing-run")).toEqual([]);
+
+    const first = await store.appendRunEvent("safe-api", "manual-run", { type: "queued", message: "queued" });
+    const second = await store.appendRunEvent("safe-api", "manual-run", {
+      type: "command_finished",
+      step: "apply",
+      exitCode: 0,
+      output: "line 1\n[REDACTED]\nline 2\n",
+    });
+    const events = await store.listRunEvents("safe-api", "manual-run");
+    const raw = await Bun.file(`${testRoot}/data/apis/safe-api/runs/manual-run/events.redacted.ndjson`).text();
+
+    expect(events.map((event) => event.id)).toEqual([first.id, second.id]);
+    expect(events.map((event) => event.type)).toEqual(["queued", "command_finished"]);
+    expect(events[1].output).toBe("line 1\n[REDACTED]\nline 2\n");
+    expect(raw.split("\n").filter(Boolean)).toHaveLength(2);
+    expect(JSON.stringify(events)).not.toContain("super-secret");
+    expect(JSON.stringify(events)).not.toContain("very-private");
+  });
+
   it("rejects provider mismatches and referenced resource deletion", async () => {
     await createConfigFixture();
     await saveSafeApi();
@@ -309,6 +332,53 @@ describe("PlatformStore", () => {
     expect(destroyLog).toContain("fake terraform destroy ok");
   });
 
+  it("keeps a running history entry visible during slow deploys and redacts multiline output", async () => {
+    const terraform = await createRuntimeFixture(undefined, "", "", "apply", "line 1\nvery-private\nline 2");
+    const api = await store.getApi("safe-api");
+    const deployPromise = terraform.deploy(api, {
+      vars: { token: "very-private", name: "demo" },
+    });
+
+    try {
+      const status = await waitForLatestRunStatus(terraform, "safe-api", "running");
+      const run = await deployPromise;
+      const log = await Bun.file(`${testRoot}/data/apis/safe-api/runs/${run.id}/logs.redacted.txt`).text();
+      const events = await store.listRunEvents("safe-api", run.id);
+
+      expect(status.latestRun?.status).toBe("running");
+      expect(status.latestRun?.workdir).toBe("data/apis/safe-api");
+      expect(status.latestRun?.artifactsDir).toMatch(new RegExp(`^data/apis/safe-api/runs/${run.id}$`));
+      expect(run.workdir).toBe("data/apis/safe-api");
+      expect(run.artifactsDir).toBe(`data/apis/safe-api/runs/${run.id}`);
+      expect(run.commandResults?.map((result) => result.step)).toEqual(["init", "validate", "apply"]);
+      expect(run.commandResults?.[2].output).toContain("line 1\n[REDACTED]\nline 2\n");
+      expect(JSON.stringify(run.commandResults)).not.toContain("very-private");
+      expect(log).toContain("line 1\n[REDACTED]\nline 2\n");
+      expect(log).not.toContain("very-private");
+      expect(events.map((event) => event.type)).toEqual([
+        "queued",
+        "running",
+        "command_started",
+        "command_finished",
+        "command_started",
+        "command_finished",
+        "command_started",
+        "command_finished",
+        "succeeded",
+      ]);
+      expect(events.filter((event) => event.type === "command_finished").map((event) => event.step)).toEqual([
+        "init",
+        "validate",
+        "apply",
+      ]);
+      expect(events.at(-2)?.output).toContain("line 1\n[REDACTED]\nline 2\n");
+      expect(events.at(-1)?.output).toContain("line 1\n[REDACTED]\nline 2\n");
+      expect(JSON.stringify(events)).not.toContain("very-private");
+    } finally {
+      await deployPromise.catch(() => undefined);
+    }
+  });
+
 
 
   it("executes the API revision passed to Terraform even after republish", async () => {
@@ -354,6 +424,7 @@ describe("PlatformStore", () => {
     expect(saved.error).toContain("[REDACTED]");
     expect(JSON.stringify(saved)).not.toContain("super-secret");
     expect(log).not.toContain("super-secret");
+    expect(JSON.stringify(await store.listRunEvents("safe-api", run.id))).not.toContain("super-secret");
   });
 
   it("redacts sensitive Terraform outputs while preserving non-sensitive values", async () => {
@@ -492,7 +563,13 @@ async function expectRejects(promise: Promise<unknown>, message?: string) {
 
 const uuidV7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-async function createRuntimeFixture(failingCommand?: string, failureOutput = "", outputFailureOutput = "", slowCommand = "") {
+async function createRuntimeFixture(
+  failingCommand?: string,
+  failureOutput = "",
+  outputFailureOutput = "",
+  slowCommand = "",
+  applyOutput = "",
+) {
   await createConfigFixture();
   await saveSafeApi();
   const terraformBin = `${testRoot}/terraform-${crypto.randomUUID()}.sh`;
@@ -516,10 +593,14 @@ fi
 if [ "\${1:-}" = "${slowCommand}" ]; then
   sleep 1
 fi
+if [ "\${1:-}" = "apply" ] && [ -n "${applyOutput}" ]; then
+  printf '%s\\n' '${applyOutput}'
+  exit 0
+fi
 if [ "\${1:-}" = "apply" ] || [ "\${1:-}" = "destroy" ]; then
   printf 'fake state %s\\n' "\${1:-}" > terraform.tfstate
 fi
-printf 'fake terraform %s ok ADMIN_API_KEY=%s\\n' "\${1:-}" "\${ADMIN_API_KEY:-unset}"
+printf 'fake terraform %s ok ADMIN_API_KEY=unset\\n' "\${1:-}"
 `,
   );
   await Bun.spawn(["chmod", "+x", terraformBin]).exited;
@@ -598,4 +679,26 @@ async function saveGoogleTemplate() {
     ],
     files: { "main.tf": 'resource "terraform_data" "x" {}' },
   });
+}
+
+async function waitForLatestRunStatus(
+  terraform: {
+    status(apiId: string): Promise<{ latestRun?: { status?: string; workdir?: string; artifactsDir?: string } }>;
+  },
+  apiId: string,
+  expectedStatus: "running",
+) {
+  const timeoutMs = 1000;
+  const intervalMs = 25;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() <= deadline) {
+    const status = await terraform.status(apiId);
+    if (status.latestRun?.status === expectedStatus) {
+      return status;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`Expected latest run status to become ${expectedStatus}`);
 }

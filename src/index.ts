@@ -246,6 +246,14 @@ const app = new Elysia()
   .get("/ui/deployments/:apiId/examples", async ({ params }) => store.getRuntimeCallExample(params.apiId), {
     params: t.Object({ apiId: idSchema }),
   })
+  .get(
+    "/ui/deployments/:apiId/runs/:runId/events/stream",
+    async ({ params, request }) => runEventsStream(params.apiId, params.runId, request),
+    { params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }) },
+  )
+  .get("/ui/deployments/:apiId/runs/:runId/events", async ({ params }) => store.listRunEvents(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
   .get("/ui/deployments/:apiId/runs/:runId", async ({ params }) => store.getRun(params.apiId, params.runId), {
     params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
   })
@@ -367,6 +375,9 @@ const app = new Elysia()
   .get("/api/deployments/:apiId/examples", async ({ params }) => store.getRuntimeCallExample(params.apiId), {
     params: t.Object({ apiId: idSchema }),
   })
+  .get("/api/deployments/:apiId/runs/:runId/events", async ({ params }) => store.listRunEvents(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
   .get("/api/deployments/:apiId/runs/:runId", async ({ params }) => store.getRun(params.apiId, params.runId), {
     params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
   })
@@ -431,6 +442,81 @@ function assetContentType(fileName: string) {
     return "font/woff2";
   }
   return "application/octet-stream";
+}
+
+async function runEventsStream(apiId: string, runId: string, request: Request) {
+  await store.getRun(apiId, runId);
+  let sentCount = 0;
+  let pollTimer: Timer | undefined;
+  let closed = false;
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const close = () => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        if (pollTimer) {
+          clearInterval(pollTimer);
+        }
+        request.signal.removeEventListener("abort", close);
+        controller.close();
+      };
+
+      const sendPendingEvents = async () => {
+        if (closed) {
+          return;
+        }
+        const events = await store.listRunEvents(apiId, runId);
+        for (const event of events.slice(sentCount)) {
+          controller.enqueue(encoder.encode(formatSseEvent(event.id, event.type, event)));
+        }
+        sentCount = events.length;
+
+        const run = await store.getRun(apiId, runId);
+        if (run.status === "succeeded" || run.status === "failed" || run.status === "needs_attention") {
+          close();
+        }
+      };
+
+      request.signal.addEventListener("abort", close);
+      await sendPendingEvents();
+      if (closed) {
+        return;
+      }
+      pollTimer = setInterval(() => {
+        void sendPendingEvents().catch((error) => {
+          if (!closed) {
+            closed = true;
+            if (pollTimer) {
+              clearInterval(pollTimer);
+            }
+            controller.error(error);
+          }
+        });
+      }, 1000);
+    },
+    cancel() {
+      closed = true;
+      if (pollTimer) {
+        clearInterval(pollTimer);
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    },
+  });
+}
+
+function formatSseEvent(id: string, eventName: string, data: unknown) {
+  return `id: ${id}\nevent: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
 function loginPage() {
