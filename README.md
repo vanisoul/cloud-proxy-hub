@@ -9,7 +9,8 @@ Admin-only Terraform management platform built with Bun and Elysia. It stores pr
 - `/config/templates/<provider-type>/<template-id>/metadata.json`: template metadata.
 - `/config/templates/<provider-type>/<template-id>/files/...`: Terraform template files.
 - `/config/apis/<provider-type>/<api-id>/metadata.json`: published API metadata referencing key and template IDs.
-- `/data/apis/<api-id>/runs/<run-id>`: Terraform run artifacts, redacted logs, and redacted metadata.
+- `/data/apis/<api-id>`: stable Terraform workdir that preserves `terraform.tfstate` for the published API.
+- `/data/apis/<api-id>/runs/<run-id>`: per-run redacted logs and metadata.
 
 Cloud provider keys are created through the admin API/UI and are not configured through `.env`.
 
@@ -18,10 +19,15 @@ Cloud provider keys are created through the admin API/UI and are not configured 
 ```bash
 bun install
 bun run dev
+ bun run dev:web
+ bun run build
+ bun run build:web
 bun run start
 bun run test
 bun run typecheck
 ```
+
+The admin frontend is a Vite/Vue/Element Plus SPA under `web/`. Run `bun run build` before `bun run start` in a fresh checkout so `web/dist` exists; Docker builds this asset bundle in its builder stage. `bun run test` also builds the SPA before running backend tests.
 
 Terraform must be installed and available as `terraform`, or set `TERRAFORM_BIN`. `ADMIN_API_KEY` is required at startup.
 

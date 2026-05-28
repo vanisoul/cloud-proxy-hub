@@ -2,18 +2,29 @@
   "name": "terraform-platform",
   "version": "0.1.0",
   "scripts": {
-    "test": "bun test",
-    "typecheck": "bunx tsc --noEmit",
+    "test": "bun run build:web && bun test src",
+    "typecheck": "bunx tsc --noEmit && bunx vue-tsc -p web/tsconfig.json --noEmit",
     "dev": "bun run --watch src/index.ts",
+    "dev:web": "bunx vite --config web/vite.config.ts",
+    "build": "bun run build:web",
+    "build:web": "bunx vite build --config web/vite.config.ts",
     "start": "bun run src/index.ts"
   },
   "dependencies": {
-    "elysia": "^1.0.20"
+    "element-plus": "^2.11.8",
+    "elysia": "^1.0.20",
+    "vue": "^3.5.24"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "bun-types": "^1.0.8"
+    "@vitejs/plugin-vue": "^6.0.2",
+    "bun-types": "^1.0.8",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.4",
+    "vue-tsc": "^3.1.5"
   },
   "module": "src/index.ts",
-  "trustedDependencies": ["@biomejs/biome"]
+  "trustedDependencies": [
+    "@biomejs/biome"
+  ]
 }

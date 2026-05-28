@@ -1,4 +1,4 @@
-export type JsonRecord = Record<string, unknown>;
+export type DeploymentAction = "deploy" | "delete";
 
 export type ProviderType = {
   id: string;
@@ -10,18 +10,14 @@ export type ProviderType = {
   docsUrl: string;
 };
 
-export type ProviderKey = {
+export type PublicProviderKey = {
   id: string;
   providerTypeId: string;
   name: string;
   description?: string;
-  env: Record<string, string>;
+  envKeys: string[];
   createdAt: string;
   updatedAt: string;
-};
-
-export type PublicProviderKey = Omit<ProviderKey, "env"> & {
-  envKeys: string[];
 };
 
 export type TemplateVariable = {
@@ -31,26 +27,20 @@ export type TemplateVariable = {
   defaultValue?: string;
 };
 
-export type TerraformTemplate = {
+export type PublicTerraformTemplate = {
   id: string;
   providerTypeId: string;
   name: string;
   version: string;
   description?: string;
   variables: TemplateVariable[];
-  files: Record<string, string>;
+  fileNames: string[];
   createdAt: string;
   updatedAt: string;
 };
 
-export type TerraformTemplateInput = Omit<TerraformTemplate, "createdAt" | "updatedAt" | "files" | "id"> & {
-  id?: string;
-  files?: Record<string, string>;
-  mainTf?: string;
-};
-
-export type PublicTerraformTemplate = Omit<TerraformTemplate, "files"> & {
-  fileNames: string[];
+export type TerraformTemplate = Omit<PublicTerraformTemplate, "fileNames"> & {
+  files: Record<string, string>;
 };
 
 export type ApiPublication = {
@@ -61,34 +51,28 @@ export type ApiPublication = {
   templateId: string;
   allowedActions: DeploymentAction[];
   revisionId: string;
-  snapshot: ApiPublicationSnapshot;
+  snapshot: {
+    key: {
+      id: string;
+      providerTypeId: string;
+      name: string;
+      envKeys: string[];
+      updatedAt: string;
+    };
+    template: {
+      id: string;
+      providerTypeId: string;
+      name: string;
+      version: string;
+      variables: TemplateVariable[];
+      files: Record<string, string>;
+      fileNames: string[];
+      updatedAt: string;
+    };
+  };
   createdAt: string;
   updatedAt: string;
 };
-
-export type ApiPublicationSnapshot = {
-  key: {
-    id: string;
-    providerTypeId: string;
-    name: string;
-    envKeys: string[];
-    updatedAt: string;
-  };
-  template: {
-    id: string;
-    providerTypeId: string;
-    name: string;
-    version: string;
-    variables: TemplateVariable[];
-    files: Record<string, string>;
-    fileNames: string[];
-    updatedAt: string;
-  };
-};
-
-export type DeploymentAction = "deploy" | "delete";
-
-export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "needs_attention";
 
 export type TerraformRun = {
   id: string;
@@ -98,7 +82,7 @@ export type TerraformRun = {
   keyId: string;
   templateId: string;
   action: DeploymentAction;
-  status: RunStatus;
+  status: "queued" | "running" | "succeeded" | "failed" | "needs_attention";
   vars: Record<string, string>;
   sensitiveVarNames: string[];
   stateId: string;
@@ -108,13 +92,11 @@ export type TerraformRun = {
   error?: string;
   workdir?: string;
   artifactsDir?: string;
-  commandResults?: TerraformCommandResult[];
-};
-
-export type TerraformCommandResult = {
-  step: "init" | "validate" | "apply" | "destroy" | "output";
-  exitCode: number;
-  output: string;
+  commandResults?: Array<{
+    step: "init" | "validate" | "apply" | "destroy" | "output";
+    exitCode: number;
+    output: string;
+  }>;
 };
 
 export type RuntimeCallExample = {
@@ -129,4 +111,11 @@ export type RuntimeActionExample = {
   path: string;
   body: { vars: Record<string, string> };
   curl: string;
+};
+
+export type BootstrapResponse = {
+  providerTypes: ProviderType[];
+  keys: PublicProviderKey[];
+  templates: PublicTerraformTemplate[];
+  apis: ApiPublication[];
 };

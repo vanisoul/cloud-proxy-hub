@@ -1,18 +1,23 @@
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
+import { dirname, join, normalize, relative } from "node:path";
 
 import { appConfig, builtInProviderTypes } from "@/config";
+import { uuidV7 } from "@/id";
+import { normalizeTemplateFiles } from "@/template";
 import type {
   ApiPublication,
   ProviderKey,
   ProviderType,
   PublicProviderKey,
   PublicTerraformTemplate,
+  RuntimeCallExample,
   TerraformRun,
   TerraformTemplate,
+  TerraformTemplateInput,
 } from "@/types";
 
-type TemplateInput = Omit<TerraformTemplate, "createdAt" | "updatedAt">;
+type KeyInput = Omit<ProviderKey, "createdAt" | "updatedAt" | "id"> & { id?: string };
+type ApiInput = Omit<ApiPublication, "createdAt" | "updatedAt" | "id" | "revisionId" | "snapshot"> & { id?: string };
 
 export class PlatformStore {
   async initialize() {
@@ -56,10 +61,14 @@ export class PlatformStore {
     return { ...metadata, env: secret.env };
   }
 
-  async saveKey(input: Omit<ProviderKey, "createdAt" | "updatedAt">): Promise<PublicProviderKey> {
+  async saveKey(input: KeyInput): Promise<PublicProviderKey> {
     await this.getProviderType(input.providerTypeId);
     const now = new Date().toISOString();
-    const key: ProviderKey = { ...input, createdAt: now, updatedAt: now };
+    const id = input.id ?? uuidV7();
+    const existing = await this.maybeReadJson<Omit<ProviderKey, "env">>(
+      this.keyPath(input.providerTypeId, id, "metadata.json"),
+    );
+    const key: ProviderKey = { ...input, id, createdAt: existing?.createdAt ?? now, updatedAt: now };
     const keyDir = this.keyPath(key.providerTypeId, key.id);
     await mkdir(keyDir, { recursive: true });
     const { env, ...metadata } = key;
@@ -87,19 +96,30 @@ export class PlatformStore {
     return { ...metadata, files };
   }
 
-  async saveTemplate(input: TemplateInput): Promise<PublicTerraformTemplate> {
+  async saveTemplate(input: TerraformTemplateInput): Promise<PublicTerraformTemplate> {
     await this.getProviderType(input.providerTypeId);
-    assertSafeTemplate(input);
+    const files = normalizeTemplateFiles(input);
     const now = new Date().toISOString();
-    const template: TerraformTemplate = { ...input, createdAt: now, updatedAt: now };
+    const id = input.id ?? uuidV7();
+    const existing = await this.maybeReadJson<Omit<TerraformTemplate, "files">>(
+      this.templatePath(input.providerTypeId, id, "metadata.json"),
+    );
+    const { mainTf: _mainTf, files: _files, ...metadataInput } = input;
+    const template: TerraformTemplate = {
+      ...metadataInput,
+      id,
+      files,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
     const templateDir = this.templatePath(template.providerTypeId, template.id);
     const filesDir = join(templateDir, "files");
     await rm(filesDir, { recursive: true, force: true });
     await mkdir(filesDir, { recursive: true });
-    const { files, ...metadata } = template;
+    const { files: savedFiles, ...metadata } = template;
     await this.writeJson(join(templateDir, "metadata.json"), metadata);
     await Promise.all(
-      Object.entries(files).map(async ([fileName, content]) => {
+      Object.entries(savedFiles).map(async ([fileName, content]) => {
         const filePath = join(filesDir, fileName);
         await mkdir(dirname(filePath), { recursive: true });
         await writeFile(filePath, content, { mode: 0o600 });
@@ -140,10 +160,10 @@ export class PlatformStore {
     return this.readJson<ApiPublication>(this.apiPath(providerTypeId, apiId, "metadata.json"));
   }
 
-  async saveApi(input: Omit<ApiPublication, "createdAt" | "updatedAt">): Promise<ApiPublication> {
+  async saveApi(input: ApiInput): Promise<ApiPublication> {
     const providerType = await this.getProviderType(input.providerTypeId);
-    await this.getKey(input.providerTypeId, input.keyId);
-    await this.getTemplate(input.providerTypeId, input.templateId);
+    const key = await this.getKey(input.providerTypeId, input.keyId);
+    const template = await this.getTemplate(input.providerTypeId, input.templateId);
     for (const action of input.allowedActions) {
       if (!providerType.supportedActions.includes(action)) {
         throw new Error(`Action ${action} is not supported by provider ${providerType.id}`);
@@ -151,13 +171,22 @@ export class PlatformStore {
     }
     const existingApis = await this.listApis();
     const conflictingApi = existingApis.find(
-      (api) => api.id === input.id && api.providerTypeId !== input.providerTypeId,
+      (api) => input.id !== undefined && api.id === input.id && api.providerTypeId !== input.providerTypeId,
     );
     if (conflictingApi) {
       throw new Error(`API ${input.id} already exists under provider ${conflictingApi.providerTypeId}`);
     }
     const now = new Date().toISOString();
-    const api = { ...input, createdAt: now, updatedAt: now };
+    const id = input.id ?? uuidV7();
+    const existing = await this.maybeReadJson<ApiPublication>(this.apiPath(input.providerTypeId, id, "metadata.json"));
+    const api: ApiPublication = {
+      ...input,
+      id,
+      revisionId: uuidV7(),
+      snapshot: toApiSnapshot(key, template),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
     const apiDir = this.apiPath(api.providerTypeId, api.id);
     await mkdir(apiDir, { recursive: true });
     await this.writeJson(join(apiDir, "metadata.json"), api);
@@ -182,6 +211,35 @@ export class PlatformStore {
     return this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"));
   }
 
+  async listRuns(apiId: string): Promise<TerraformRun[]> {
+    await this.getApi(apiId);
+    const runsDir = this.apiDataPath(apiId, "runs");
+    await mkdir(runsDir, { recursive: true });
+    const runIds = await readdir(runsDir);
+    const runs = await Promise.all(
+      runIds.map((runId) => this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"))),
+    );
+    return runs.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async getRuntimeCallExample(apiId: string): Promise<RuntimeCallExample> {
+    const api = await this.getApi(apiId);
+    const body = {
+      vars: Object.fromEntries(api.snapshot.template.variables.map((variable) => [variable.name, ""])),
+    };
+    const example: RuntimeCallExample = {
+      apiId: api.id,
+      apiRevisionId: api.revisionId,
+    };
+    if (api.allowedActions.includes("deploy")) {
+      example.deploy = runtimeActionExample(api.id, "deploy", body);
+    }
+    if (api.allowedActions.includes("delete")) {
+      example.delete = runtimeActionExample(api.id, "delete", body);
+    }
+    return example;
+  }
+
   async getLatestRun(apiId: string): Promise<TerraformRun | undefined> {
     const runsDir = this.apiDataPath(apiId, "runs");
     await mkdir(runsDir, { recursive: true });
@@ -194,6 +252,10 @@ export class PlatformStore {
 
   runPath(apiId: string, runId: string, ...parts: string[]) {
     return this.dataPath("apis", apiId, "runs", runId, ...parts);
+  }
+
+  terraformPath(apiId: string, ...parts: string[]) {
+    return this.dataPath("apis", apiId, ...parts);
   }
 
   apiDataPath(apiId: string, ...parts: string[]) {
@@ -286,6 +348,17 @@ export class PlatformStore {
     return JSON.parse(content) as T;
   }
 
+  private async maybeReadJson<T>(filePath: string): Promise<T | undefined> {
+    try {
+      return await this.readJson<T>(filePath);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   private async writeJson(filePath: string, value: unknown) {
     await mkdir(dirname(filePath), { recursive: true });
     const tempPath = `${filePath}.${crypto.randomUUID()}.tmp`;
@@ -328,58 +401,40 @@ function getId(value: unknown) {
   return "";
 }
 
-function assertSafeTemplate(template: TemplateInput) {
-  for (const [fileName, content] of Object.entries(template.files)) {
-    if (isUnsafeRelativePath(fileName)) {
-      throw new Error(`Template file ${fileName} is not a safe relative path`);
-    }
-    if (!fileName.endsWith(".tf") && !fileName.endsWith(".tf.json")) {
-      throw new Error(`Template file ${fileName} is not a Terraform file`);
-    }
-    if (
-      /(?:^|[^A-Za-z0-9_-])(?:terraform|backend|required_providers|provider|provisioner|local-exec|remote-exec)(?=[^A-Za-z0-9_-]|$)/i.test(
-        content,
-      )
-    ) {
-      throw new Error(`Template file ${fileName} contains a blocked Terraform construct`);
-    }
-    if (fileName.endsWith(".tf.json") && hasBlockedTerraformJsonConstruct(content)) {
-      throw new Error(`Template file ${fileName} contains a blocked Terraform construct`);
-    }
-  }
+
+function toApiSnapshot(key: ProviderKey, template: TerraformTemplate): ApiPublication["snapshot"] {
+  return {
+    key: {
+      id: key.id,
+      providerTypeId: key.providerTypeId,
+      name: key.name,
+      envKeys: Object.keys(key.env).sort(),
+      updatedAt: key.updatedAt,
+    },
+    template: {
+      id: template.id,
+      providerTypeId: template.providerTypeId,
+      name: template.name,
+      version: template.version,
+      variables: template.variables,
+      files: template.files,
+      fileNames: Object.keys(template.files).sort(),
+      updatedAt: template.updatedAt,
+    },
+  };
 }
 
-function hasBlockedTerraformJsonConstruct(content: string) {
-  try {
-    return containsBlockedJsonKey(JSON.parse(content));
-  } catch {
-    throw new Error("Template file contains invalid Terraform JSON");
-  }
-}
-
-function containsBlockedJsonKey(value: unknown): boolean {
-  if (Array.isArray(value)) {
-    return value.some(containsBlockedJsonKey);
-  }
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  return Object.entries(value).some(
-    ([key, child]) =>
-      ["terraform", "backend", "provider", "provisioner", "required_providers", "local-exec", "remote-exec"].includes(
-        key,
-      ) || containsBlockedJsonKey(child),
-  );
-}
-
-function isUnsafeRelativePath(fileName: string) {
-  const normalized = normalize(fileName);
-  const segments = fileName.split(/[\\/]+/);
-  return (
-    isAbsolute(fileName) ||
-    segments.includes("..") ||
-    normalized === ".." ||
-    normalized.startsWith(`..${sep}`) ||
-    normalized.includes(`${sep}..${sep}`)
-  );
+function runtimeActionExample(
+  apiId: string,
+  action: "deploy" | "delete",
+  body: { vars: Record<string, string> },
+): NonNullable<RuntimeCallExample["deploy"]> {
+  const path = `/api/deployments/${apiId}/${action}`;
+  const json = JSON.stringify(body);
+  return {
+    method: "POST",
+    path,
+    body,
+    curl: `curl -X POST \"$BASE_URL${path}\" -H \"Authorization: Bearer $ADMIN_API_KEY\" -H \"Content-Type: application/json\" -d '${json}'`,
+  };
 }

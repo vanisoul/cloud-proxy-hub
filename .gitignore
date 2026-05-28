@@ -53,3 +53,5 @@ generated
 *.tfplan
 
 .omo
+/web/dist
+.playwright-mcp

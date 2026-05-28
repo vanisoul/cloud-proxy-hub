@@ -16,7 +16,7 @@ install:
 test:
     #!/usr/bin/env bash
     echo "運行測試"
-    bun test
+    bun run test
 
 # 運行開發服務器
 dev:
@@ -144,5 +144,4 @@ logs:
 
     echo "顯示 Docker 容器 $IMAGE_NAME 的日誌"
     docker logs -f $IMAGE_NAME
-
 

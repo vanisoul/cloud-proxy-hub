@@ -44,6 +44,40 @@ describe("PlatformStore", () => {
     expect(secret.env.ALICLOUD_SECRET_KEY).toBe("secret");
   });
 
+  it("generates uuidv7 resource ids when callers omit ids", async () => {
+    await store.initialize();
+    const key = await store.saveKey({
+      providerTypeId: "aliyun-alicloud",
+      name: "Generated key",
+      env: {
+        ALICLOUD_ACCESS_KEY: "access",
+        ALICLOUD_SECRET_KEY: "secret",
+        ALICLOUD_REGION: "cn-shanghai",
+      },
+    });
+    const template = await store.saveTemplate({
+      providerTypeId: "aliyun-alicloud",
+      name: "Generated template",
+      version: "1.0.0",
+      variables: [],
+      mainTf: 'resource "terraform_data" "x" {}',
+    });
+    const api = await store.saveApi({
+      providerTypeId: "aliyun-alicloud",
+      name: "Generated API",
+      keyId: key.id,
+      templateId: template.id,
+      allowedActions: ["deploy"],
+    });
+
+    expect(key.id).toMatch(uuidV7Pattern);
+    expect(template.id).toMatch(uuidV7Pattern);
+    expect(api.id).toMatch(uuidV7Pattern);
+    expect(await Bun.file(`${testRoot}/config/keys/aliyun-alicloud/${key.id}/metadata.json`).exists()).toBe(true);
+    expect(await Bun.file(`${testRoot}/config/templates/aliyun-alicloud/${template.id}/metadata.json`).exists()).toBe(true);
+    expect(await Bun.file(`${testRoot}/config/apis/aliyun-alicloud/${api.id}/metadata.json`).exists()).toBe(true);
+  });
+
   it("stores provider-scoped templates as metadata plus files", async () => {
     await store.initialize();
     const template = await saveSafeTemplate();
@@ -54,6 +88,33 @@ describe("PlatformStore", () => {
     expect(metadata.name).toBe("Safe");
     expect(metadata.files).toBeUndefined();
     expect(file).toContain("terraform_data");
+  });
+
+  it("stores raw main.tf templates and blocks unsafe provider constructs", async () => {
+    await store.initialize();
+    const template = await store.saveTemplate({
+      id: "raw-main",
+      name: "Raw main",
+      providerTypeId: "aliyun-alicloud",
+      version: "1.0.0",
+      variables: [],
+      mainTf: 'resource "terraform_data" "x" {}',
+    });
+    const file = await Bun.file(`${testRoot}/config/templates/aliyun-alicloud/raw-main/files/main.tf`).text();
+
+    expect(template.fileNames).toEqual(["main.tf"]);
+    expect(file).toBe('resource "terraform_data" "x" {}');
+    await expectRejects(
+      store.saveTemplate({
+        id: "raw-provider",
+        name: "Raw provider",
+        providerTypeId: "aliyun-alicloud",
+        version: "1.0.0",
+        variables: [],
+        mainTf: 'provider "alicloud" {}',
+      }),
+      "blocked",
+    );
   });
 
   it("blocks unsafe Terraform template constructs and paths", async () => {
@@ -70,6 +131,8 @@ describe("PlatformStore", () => {
       "blocked",
     );
     await expectTemplateError({ "main.tf.json": JSON.stringify({ provider: { alicloud: {} } }) }, "blocked");
+    await expectTemplateError({ "main.tf": 'module "x" { source = "./x" }' }, "blocked");
+    await expectTemplateError({ "main.tf.json": JSON.stringify({ module: { x: { source: "./x" } } }) }, "blocked");
   });
 
   it("overwrites templates without leaving stale files behind", async () => {
@@ -109,6 +172,61 @@ describe("PlatformStore", () => {
     expect(api.templateId).toBe("safe");
     expect(apis).toHaveLength(1);
     expect(metadata).toMatchObject({ providerTypeId: "aliyun-alicloud", keyId: "aliyun-main", templateId: "safe" });
+  });
+
+
+
+  it("stores API publish snapshots and runtime examples without secrets", async () => {
+    await createConfigFixture();
+    const api = await saveSafeApi();
+    const metadata = await Bun.file(`${testRoot}/config/apis/aliyun-alicloud/safe-api/metadata.json`).json();
+    const example = await store.getRuntimeCallExample("safe-api");
+
+    expect(api.revisionId).toMatch(uuidV7Pattern);
+    expect(api.snapshot.key.id).toBe("aliyun-main");
+    expect(api.snapshot.template.id).toBe("safe");
+    expect(api.snapshot.template.variables.map((variable) => variable.name)).toEqual(["name", "token"]);
+    expect(api.snapshot.template.files["main.tf"]).toContain("terraform_data");
+    expect(metadata.revisionId).toBe(api.revisionId);
+    expect(JSON.stringify(metadata)).not.toContain("secret");
+    expect(example.apiRevisionId).toBe(api.revisionId);
+    expect(example.deploy).toBeDefined();
+    const deployExample = example.deploy;
+    if (!deployExample) {
+      throw new Error("Expected deploy example to be defined");
+    }
+    expect(deployExample.method).toBe("POST");
+    expect(deployExample.path).toBe("/api/deployments/safe-api/deploy");
+    expect(deployExample.body).toEqual({ vars: { name: "", token: "" } });
+    expect(deployExample.curl).toContain("/api/deployments/safe-api/deploy");
+    expect(deployExample.curl).not.toContain("secret");
+  });
+
+  it("records API revision on runs and lists runtime history by API", async () => {
+    const terraform = await createRuntimeFixture();
+    const api = await store.getApi("safe-api");
+    await store.saveTemplate({
+      id: "safe",
+      providerTypeId: "aliyun-alicloud",
+      name: "Safe replacement",
+      version: "1.0.1",
+      variables: [
+        { name: "name", required: true, sensitive: false },
+        { name: "token", required: true, sensitive: true },
+      ],
+      files: { "replacement.tf": 'resource "terraform_data" "replacement" {}' },
+    });
+
+    const run = await terraform.deploy(api, { vars: { token: "super-secret", name: "demo" } });
+    const runs = await store.listRuns("safe-api");
+
+    expect(run.apiRevisionId).toBe(api.revisionId);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].id).toBe(run.id);
+    expect(runs[0].apiRevisionId).toBe(api.revisionId);
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/main.tf`).exists()).toBe(true);
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/replacement.tf`).exists()).toBe(false);
+    expect(JSON.stringify(runs)).not.toContain("super-secret");
   });
 
   it("rejects provider mismatches and referenced resource deletion", async () => {
@@ -167,6 +285,63 @@ describe("PlatformStore", () => {
     expect(versions).toContain('source = "aliyun/alicloud"');
   });
 
+  it("reuses a stable API Terraform workdir and returns command details", async () => {
+    const terraform = await createRuntimeFixture();
+    const api = await store.getApi("safe-api");
+    const deploy = await terraform.deploy(api, {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const destroy = await terraform.delete(api, {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const stateFile = await Bun.file(`${testRoot}/data/apis/safe-api/terraform.tfstate`).text();
+    const deployLog = await Bun.file(`${testRoot}/data/apis/safe-api/runs/${deploy.id}/logs.redacted.txt`).text();
+    const destroyLog = await Bun.file(`${testRoot}/data/apis/safe-api/runs/${destroy.id}/logs.redacted.txt`).text();
+
+    expect(deploy.id).toMatch(uuidV7Pattern);
+    expect(destroy.id).toMatch(uuidV7Pattern);
+    expect(deploy.workdir).toBe("data/apis/safe-api");
+    expect(deploy.artifactsDir).toBe(`data/apis/safe-api/runs/${deploy.id}`);
+    expect(deploy.commandResults?.map((result) => result.step)).toEqual(["init", "validate", "apply"]);
+    expect(destroy.commandResults?.map((result) => result.step)).toEqual(["init", "validate", "destroy"]);
+    expect(stateFile).toContain("fake state");
+    expect(deployLog).toContain("fake terraform apply ok");
+    expect(destroyLog).toContain("fake terraform destroy ok");
+  });
+
+
+
+  it("executes the API revision passed to Terraform even after republish", async () => {
+    const terraform = await createRuntimeFixture();
+    const originalApi = await store.getApi("safe-api");
+    await store.saveTemplate({
+      id: "safe",
+      providerTypeId: "aliyun-alicloud",
+      name: "Safe replacement",
+      version: "1.0.1",
+      variables: [
+        { name: "name", required: true, sensitive: false },
+        { name: "token", required: true, sensitive: true },
+      ],
+      files: { "replacement.tf": 'resource "terraform_data" "replacement" {}' },
+    });
+    const republished = await store.saveApi({
+      id: originalApi.id,
+      providerTypeId: originalApi.providerTypeId,
+      name: originalApi.name,
+      keyId: originalApi.keyId,
+      templateId: originalApi.templateId,
+      allowedActions: originalApi.allowedActions,
+    });
+
+    const run = await terraform.deploy(originalApi, { vars: { token: "super-secret", name: "demo" } });
+
+    expect(republished.revisionId).not.toBe(originalApi.revisionId);
+    expect(run.apiRevisionId).toBe(originalApi.revisionId);
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/main.tf`).exists()).toBe(true);
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/replacement.tf`).exists()).toBe(false);
+  });
+
   it("redacts Terraform failure output before saving run metadata", async () => {
     const terraform = await createRuntimeFixture("apply", "super-secret leaked by terraform");
     const run = await terraform.deploy(await store.getApi("safe-api"), {
@@ -207,6 +382,86 @@ describe("PlatformStore", () => {
     expect(JSON.stringify(response)).toContain("Terraform output failed");
     expect(response.error).toBe("Terraform output failed");
   });
+
+  it("validates raw templates with the selected Terraform provider", async () => {
+    const terraform = await createRuntimeFixture("validate", "provider schema rejected template");
+
+    await expectRejects(
+      terraform.validateTemplate({
+        providerTypeId: "aliyun-alicloud",
+        name: "Invalid provider template",
+        version: "1.0.0",
+        variables: [],
+        mainTf: 'resource "terraform_data" "x" {}',
+      }),
+      "provider schema rejected template",
+    );
+  });
+
+  it("rejects unsafe template validation before Terraform is called", async () => {
+    const terraform = await createRuntimeFixture();
+    await Bun.file(`${testRoot}/terraform-called.txt`).delete();
+
+    await expectRejects(
+      terraform.validateTemplate({
+        id: "escape",
+        providerTypeId: "aliyun-alicloud",
+        name: "Escape",
+        version: "1.0.0",
+        variables: [],
+        files: { "../escape.tf": 'resource "terraform_data" "x" {}' },
+      }),
+      "safe relative path",
+    );
+    expect(await Bun.file(`${testRoot}/data/escape.tf`).exists()).toBe(false);
+    expect(await Bun.file(`${testRoot}/terraform-called.txt`).exists()).toBe(false);
+  });
+
+  it("removes stale Terraform config files before reusing an API workdir", async () => {
+    const terraform = await createRuntimeFixture();
+    const api = await store.getApi("safe-api");
+    await terraform.deploy(api, { vars: { token: "super-secret", name: "demo" } });
+    await Bun.write(`${testRoot}/data/apis/safe-api/stale.tf`, 'resource "terraform_data" "stale" {}');
+
+    await store.saveTemplate({
+      id: "safe",
+      providerTypeId: "aliyun-alicloud",
+      name: "Safe replacement",
+      version: "1.0.1",
+      variables: [
+        { name: "name", required: true, sensitive: false },
+        { name: "token", required: true, sensitive: true },
+      ],
+      files: { "replacement.tf": 'resource "terraform_data" "replacement" {}' },
+    });
+    const republished = await store.saveApi({
+      id: api.id,
+      providerTypeId: api.providerTypeId,
+      name: api.name,
+      keyId: api.keyId,
+      templateId: api.templateId,
+      allowedActions: api.allowedActions,
+    });
+    await terraform.deploy(republished, { vars: { token: "super-secret", name: "demo" } });
+
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/stale.tf`).exists()).toBe(false);
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/main.tf`).exists()).toBe(false);
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/replacement.tf`).exists()).toBe(true);
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/terraform.tfstate`).exists()).toBe(true);
+  });
+
+  it("rejects concurrent Terraform runs for the same API", async () => {
+    const terraform = await createRuntimeFixture(undefined, "", "", "apply");
+    const api = await store.getApi("safe-api");
+    const first = terraform.deploy(api, { vars: { token: "super-secret", name: "demo" } });
+
+    await expectRejects(
+      terraform.delete(api, { vars: { token: "super-secret", name: "demo" } }),
+      "already has a Terraform run in progress",
+    );
+
+    await first;
+  });
 });
 
 async function expectTemplateError(files: Record<string, string>, message: string) {
@@ -235,7 +490,9 @@ async function expectRejects(promise: Promise<unknown>, message?: string) {
   }
 }
 
-async function createRuntimeFixture(failingCommand?: string, failureOutput = "", outputFailureOutput = "") {
+const uuidV7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+async function createRuntimeFixture(failingCommand?: string, failureOutput = "", outputFailureOutput = "", slowCommand = "") {
   await createConfigFixture();
   await saveSafeApi();
   const terraformBin = `${testRoot}/terraform-${crypto.randomUUID()}.sh`;
@@ -251,9 +508,16 @@ if [ "\${1:-}" = "output" ]; then
   printf '%s\\n' '{"secret_output":{"sensitive":true,"type":"string","value":"super-secret"},"plain_output":{"sensitive":false,"type":"string","value":"hello"}}'
   exit 0
 fi
+printf 'called\n' > '${testRoot}/terraform-called.txt'
 if [ "\${1:-}" = "${failingCommand ?? ""}" ]; then
   printf '%s\\n' '${failureOutput}' >&2
   exit 1
+fi
+if [ "\${1:-}" = "${slowCommand}" ]; then
+  sleep 1
+fi
+if [ "\${1:-}" = "apply" ] || [ "\${1:-}" = "destroy" ]; then
+  printf 'fake state %s\\n' "\${1:-}" > terraform.tfstate
 fi
 printf 'fake terraform %s ok ADMIN_API_KEY=%s\\n' "\${1:-}" "\${ADMIN_API_KEY:-unset}"
 `,

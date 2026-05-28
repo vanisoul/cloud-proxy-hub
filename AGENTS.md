@@ -8,7 +8,8 @@
 
 | Task | Location | Notes |
 |------|----------|-------|
-| HTTP API / admin UI | `src/index.ts` | Elysia app, auth, provider-scoped API routes, simple HTML admin landing page. |
+| HTTP API / admin UI shell | `src/index.ts` | Elysia app, auth, provider-scoped API routes, login page, and built SPA static serving. |
+| Admin SPA frontend | `web/` | Vite + Vue 3 + Element Plus admin console built to `web/dist`. |
 | Provider catalog defaults | `src/config.ts` | Built-in `aliyun/alicloud` and `hashicorp/google` metadata. |
 | Domain types | `src/types.ts` | Provider, key, template, API, run contracts. |
 | Filesystem storage | `src/storage.ts` | `/config/keys`, `/config/templates`, `/config/apis`, and `/data/apis` repositories. |
@@ -18,6 +19,7 @@
 ## CONVENTIONS
 
 - Runtime/package manager is Bun. Use `bun run test` and `bun run typecheck` for validation.
+- Admin UI is a Vite/Vue/Element Plus SPA under `web/`; run `bun run build` before `bun run start` in fresh checkouts.
 - TypeScript path alias `@/*` maps to `./src/*`.
 - No Prisma, SQLite, Aliyun SDK, cron cleanup, or legacy VPN/SOCKS5 workflow remains.
 - Mutations must use non-GET routes.
@@ -38,6 +40,8 @@
 ```bash
 bun install
 bun run dev
+ bun run dev:web
+ bun run build
 bun run start
 bun run test
 bun run typecheck
