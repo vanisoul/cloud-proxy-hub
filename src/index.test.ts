@@ -142,6 +142,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).toContain('@click="selectRunEvent(row)"');
     expect(app).toContain('selectedRunEvent.output');
     expect(app).toContain('openRunEventsStream(api, runId, seq);');
+    expect(app).toContain('"command_output"');
     expect(app).toContain('new EventSource(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events/stream`)');
     expect(app).toContain('`/ui/deployments/${encodeURIComponent(api.id)}/${action}/start`');
     expect(app).toContain('requestJson<TerraformRunEvent[]>(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events`)');

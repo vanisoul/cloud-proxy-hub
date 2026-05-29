@@ -480,13 +480,13 @@ async function runEventsStream(apiId: string, runId: string, request: Request) {
           return;
         }
         const events = await store.listRunEvents(apiId, runId);
-        for (const event of events.slice(sentCount)) {
+        const pendingEvents = events.slice(sentCount);
+        for (const event of pendingEvents) {
           controller.enqueue(encoder.encode(formatSseEvent(event.id, event.type, event)));
         }
         sentCount = events.length;
 
-        const run = await store.getRun(apiId, runId);
-        if (run.status === "succeeded" || run.status === "failed" || run.status === "needs_attention") {
+        if (pendingEvents.some((event) => event.type === "succeeded" || event.type === "failed")) {
           close();
         }
       };

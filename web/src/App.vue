@@ -468,7 +468,7 @@ function openRunEventsStream(api: ApiPublication, runId: string, seq = runtimeRe
   const stream = new EventSource(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events/stream`);
   runEventsStream = stream;
 
-  for (const eventName of ["queued", "running", "command_started", "command_finished", "succeeded", "failed"] as const) {
+  for (const eventName of ["queued", "running", "command_started", "command_output", "command_finished", "succeeded", "failed"] as const) {
     stream.addEventListener(eventName, (message) => {
       if (runEventsStream !== stream) {
         return;

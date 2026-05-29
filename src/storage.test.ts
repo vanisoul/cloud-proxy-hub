@@ -363,6 +363,7 @@ describe("PlatformStore", () => {
         "command_started",
         "command_finished",
         "command_started",
+        "command_output",
         "command_finished",
         "succeeded",
       ]);
@@ -379,6 +380,58 @@ describe("PlatformStore", () => {
     }
   });
 
+  it("streams redacted Terraform command output events before the command finishes", async () => {
+    const terraform = await createRuntimeFixture(undefined, "", "", "", "", "stream line 1\nvery-private\nstream line 2");
+    const api = await store.getApi("safe-api");
+    const deployPromise = terraform.deploy(api, {
+      vars: { token: "very-private", name: "demo" },
+    });
+
+    try {
+      const outputEvent = await waitForRunEvent("safe-api", "command_output");
+      const status = await terraform.status("safe-api");
+
+      expect(status.latestRun?.status).toBe("running");
+      expect(outputEvent.step).toBe("apply");
+      expect(outputEvent.output).toContain("stream line 1");
+      expect(outputEvent.output).toContain("[REDACTED]");
+      expect(outputEvent.output).not.toContain("very-private");
+
+      await deployPromise;
+    } finally {
+      await deployPromise.catch(() => undefined);
+    }
+  });
+
+
+  it("does not leak secrets split across streamed Terraform output chunks", async () => {
+    const terraform = await createRuntimeFixture(undefined, "", "", "", "", "", ["very-", "private"]);
+    const api = await store.getApi("safe-api");
+    const deployPromise = terraform.deploy(api, {
+      vars: { token: "very-private", name: "demo" },
+    });
+
+    try {
+      const outputEvent = await waitForRunEvent("safe-api", "command_output");
+      const status = await terraform.status("safe-api");
+
+      expect(status.latestRun?.status).toBe("running");
+      expect(outputEvent.step).toBe("apply");
+      expect(JSON.stringify(await store.listRunEvents("safe-api", outputEvent.runId))).not.toContain("very-private");
+
+      const run = await deployPromise;
+      const events = await store.listRunEvents("safe-api", run.id);
+      const outputEvents = events.filter((event) => event.type === "command_output");
+      const streamedOutput = outputEvents.map((event) => event.output ?? "").join("");
+
+      expect(outputEvents.length).toBeGreaterThanOrEqual(1);
+      expect(streamedOutput).toContain("[REDACTED]");
+      expect(streamedOutput).not.toContain("very-private");
+      expect(JSON.stringify(events)).not.toContain("very-private");
+    } finally {
+      await deployPromise.catch(() => undefined);
+    }
+  });
   it("starts deploys asynchronously while events persist through terminal status", async () => {
     const terraform = await createRuntimeFixture(undefined, "", "", "apply");
     const api = await store.getApi("safe-api");
@@ -409,6 +462,7 @@ describe("PlatformStore", () => {
       "command_started",
       "command_finished",
       "command_started",
+      "command_output",
       "command_finished",
       "succeeded",
     ]);
@@ -605,6 +659,8 @@ async function createRuntimeFixture(
   outputFailureOutput = "",
   slowCommand = "",
   applyOutput = "",
+  streamingApplyOutput = "",
+  splitStreamingApplyOutput: [string, string] | undefined = undefined,
 ) {
   await createConfigFixture();
   await saveSafeApi();
@@ -631,6 +687,20 @@ if [ "\${1:-}" = "${slowCommand}" ]; then
 fi
 if [ "\${1:-}" = "apply" ] && [ -n "${applyOutput}" ]; then
   printf '%s\\n' '${applyOutput}'
+  exit 0
+fi
+if [ "\${1:-}" = "apply" ] && [ -n "${streamingApplyOutput}" ]; then
+  printf '%s\n' '${streamingApplyOutput}'
+  sleep 1
+  printf '%s\n' 'stream finished'
+  exit 0
+fi
+if [ "\${1:-}" = "apply" ] && [ -n "${splitStreamingApplyOutput?.join("") ?? ""}" ]; then
+  printf '%s' '${splitStreamingApplyOutput?.[0] ?? ""}'
+  sleep 1
+  printf '%s\n' '${splitStreamingApplyOutput?.[1] ?? ""}'
+  sleep 1
+  printf '%s\n' 'stream finished'
   exit 0
 fi
 if [ "\${1:-}" = "apply" ] || [ "\${1:-}" = "destroy" ]; then
@@ -715,6 +785,25 @@ async function saveGoogleTemplate() {
     ],
     files: { "main.tf": 'resource "terraform_data" "x" {}' },
   });
+}
+
+async function waitForRunEvent(apiId: string, type: string) {
+  const timeoutMs = 2000;
+  const intervalMs = 25;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() <= deadline) {
+    const runs = await store.listRuns(apiId);
+    for (const run of runs) {
+      const event = (await store.listRunEvents(apiId, run.id)).find((candidate) => candidate.type === type);
+      if (event) {
+        return event;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`Expected run event ${type}`);
 }
 
 async function waitForLatestRunStatus(

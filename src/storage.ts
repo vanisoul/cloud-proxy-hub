@@ -248,9 +248,9 @@ export class PlatformStore {
     await mkdir(runsDir, { recursive: true });
     const runIds = await readdir(runsDir);
     const runs = await Promise.all(
-      runIds.map((runId) => this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"))),
+      runIds.map((runId) => this.maybeReadJson<TerraformRun>(this.runPath(apiId, runId, "run.json"))),
     );
-    return runs.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    return runs.filter((run) => run !== undefined).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
   async getRuntimeCallExample(apiId: string): Promise<RuntimeCallExample> {
@@ -276,9 +276,9 @@ export class PlatformStore {
     await mkdir(runsDir, { recursive: true });
     const runIds = await readdir(runsDir);
     const runs = await Promise.all(
-      runIds.map((runId) => this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"))),
+      runIds.map((runId) => this.maybeReadJson<TerraformRun>(this.runPath(apiId, runId, "run.json"))),
     );
-    return runs.sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    return runs.filter((run) => run !== undefined).sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   }
 
   runPath(apiId: string, runId: string, ...parts: string[]) {

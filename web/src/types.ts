@@ -103,6 +103,7 @@ export type TerraformRunEventType =
   | "queued"
   | "running"
   | "command_started"
+  | "command_output"
   | "command_finished"
   | "succeeded"
   | "failed";

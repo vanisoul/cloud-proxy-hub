@@ -233,7 +233,7 @@ export class TerraformService {
     }
 
     const actionStep = run.action === "deploy" ? "apply" : "destroy";
-    const action = await this.runCommand(run, actionStep, terraformArgs(run.action), workDir, env, secrets);
+    const action = await this.runCommand(run, actionStep, terraformArgs(run.action), workDir, env, secrets, true);
     const redactedOutput = redactSecrets(action.output, secrets);
     commandResults.push(toCommandResult(actionStep, action, secrets));
     const updated = updateRun(
@@ -261,10 +261,35 @@ export class TerraformService {
     workDir: string,
     env: Record<string, string | undefined>,
     secrets: string[],
+    streamOutput = false,
   ) {
     const message = `terraform ${args.join(" ")}`;
     await this.store.appendRunEvent(run.apiId, run.id, { type: "command_started", step, message });
-    const result = await runTerraform(args, workDir, env);
+    const streamRedactors: Record<ProcessOutputStream, StreamingRedactor> = {
+      stdout: new StreamingRedactor(secrets),
+      stderr: new StreamingRedactor(secrets),
+    };
+    let outputEventQueue = Promise.resolve();
+    const appendOutputEvent = (output: string) => {
+      if (!streamOutput || output.length === 0) {
+        return outputEventQueue;
+      }
+      outputEventQueue = outputEventQueue.then(async () => {
+        await this.store.appendRunEvent(run.apiId, run.id, {
+          type: "command_output",
+          step,
+          message,
+          output,
+        });
+      });
+      return outputEventQueue;
+    };
+    const result = await runTerraform(args, workDir, env, async (output, streamName) => {
+      await appendOutputEvent(streamRedactors[streamName].push(output));
+    });
+    await appendOutputEvent(streamRedactors.stdout.flush());
+    await appendOutputEvent(streamRedactors.stderr.flush());
+    await outputEventQueue;
     await this.store.appendRunEvent(run.apiId, run.id, {
       type: "command_finished",
       step,
@@ -350,7 +375,14 @@ function relativeRunPath(apiId: string, runId: string) {
   return `data/apis/${apiId}/runs/${runId}`;
 }
 
-async function runTerraform(args: string[], cwd: string, env: Record<string, string | undefined>) {
+type ProcessOutputStream = "stdout" | "stderr";
+
+async function runTerraform(
+  args: string[],
+  cwd: string,
+  env: Record<string, string | undefined>,
+  onOutput?: (output: string, streamName: ProcessOutputStream) => Promise<void>,
+) {
   const proc = Bun.spawn([Bun.env.TERRAFORM_BIN ?? appConfig.terraformBin, ...args], {
     cwd,
     env,
@@ -358,11 +390,73 @@ async function runTerraform(args: string[], cwd: string, env: Record<string, str
     stderr: "pipe",
   });
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    readProcessOutput(proc.stdout, "stdout", onOutput),
+    readProcessOutput(proc.stderr, "stderr", onOutput),
     proc.exited,
   ]);
   return { exitCode, output: `${stdout}${stderr}` };
+}
+
+async function readProcessOutput(
+  stream: ReadableStream<Uint8Array>,
+  streamName: ProcessOutputStream,
+  onOutput?: (output: string, streamName: ProcessOutputStream) => Promise<void>,
+) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    const chunk = decoder.decode(value, { stream: true });
+    output += chunk;
+    if (chunk.length > 0) {
+      await onOutput?.(chunk, streamName);
+    }
+  }
+
+  const finalChunk = decoder.decode();
+  output += finalChunk;
+  if (finalChunk.length > 0) {
+    await onOutput?.(finalChunk, streamName);
+  }
+  return output;
+}
+
+class StreamingRedactor {
+  private pending = "";
+
+  constructor(private readonly secrets: string[]) {}
+
+  push(chunk: string) {
+    this.pending = redactSecrets(`${this.pending}${chunk}`, this.secrets);
+    const pendingLength = longestPossibleSecretPrefix(this.pending, this.secrets);
+    const emitLength = this.pending.length - pendingLength;
+    const output = this.pending.slice(0, emitLength);
+    this.pending = this.pending.slice(emitLength);
+    return output;
+  }
+
+  flush() {
+    const output = redactSecrets(this.pending, this.secrets);
+    this.pending = "";
+    return output;
+  }
+}
+
+function longestPossibleSecretPrefix(output: string, secrets: string[]) {
+  let length = 0;
+  for (const secret of secrets) {
+    for (let prefixLength = 1; prefixLength < secret.length; prefixLength += 1) {
+      if (output.endsWith(secret.slice(0, prefixLength))) {
+        length = Math.max(length, prefixLength);
+      }
+    }
+  }
+  return length;
 }
 
 function terraformEnv(keyEnv: Record<string, string>) {
