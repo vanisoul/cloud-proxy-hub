@@ -230,8 +230,18 @@ const app = new Elysia()
     { params: t.Object({ apiId: idSchema }), body: runSchema },
   )
   .post(
+    "/ui/deployments/:apiId/deploy/start",
+    async ({ params, body }) => terraform.startDeploy(await store.getApi(params.apiId), body),
+    { params: t.Object({ apiId: idSchema }), body: runSchema },
+  )
+  .post(
     "/ui/deployments/:apiId/delete",
     async ({ params, body }) => terraform.delete(await store.getApi(params.apiId), body),
+    { params: t.Object({ apiId: idSchema }), body: runSchema },
+  )
+  .post(
+    "/ui/deployments/:apiId/delete/start",
+    async ({ params, body }) => terraform.startDelete(await store.getApi(params.apiId), body),
     { params: t.Object({ apiId: idSchema }), body: runSchema },
   )
   .get("/ui/deployments/:apiId/status", async ({ params }) => terraform.status(params.apiId), {

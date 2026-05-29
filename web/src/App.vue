@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import { requestJson } from "./api";
@@ -21,8 +21,8 @@ import type {
   ProviderType,
   PublicProviderKey,
   PublicTerraformTemplate,
-  RuntimeCallExample,
   TerraformRun,
+  TerraformRunEvent,
   TerraformTemplate,
   TemplateVariable,
 } from "./types";
@@ -80,16 +80,12 @@ const editingKeyId = ref("");
 const editingTemplateId = ref("");
 const editingApiId = ref("");
 const runtimeApiId = ref("");
-const runtimeVarsJson = ref("{}");
-const runIdInput = ref("");
-const latestRun = ref<TerraformRun | null>(null);
 const runList = ref<TerraformRun[] | null>(null);
-const examples = ref<RuntimeCallExample | null>(null);
-const statusResult = ref<unknown>(null);
-const outputResult = ref<unknown>(null);
 const runDetail = ref<TerraformRun | null>(null);
+const runEvents = ref<TerraformRunEvent[]>([]);
 const currentLocale = ref<LocaleKey>(loadSavedLocale());
 const templateFiles = ref<Record<string, string>>({ "main.tf": sampleTemplate });
+let runEventsStream: EventSource | null = null;
 
 const keyForm = reactive<KeyForm>({ name: "", description: "", env: {} });
 const templateForm = reactive<TemplateForm>({
@@ -111,16 +107,6 @@ const selectedRuntimeApi = computed(() => state.apis.find((api) => api.id === ru
 const selectedRuntimeTemplate = computed(() => selectedRuntimeApi.value?.snapshot.template);
 const deployDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("deploy"));
 const deleteDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("delete"));
-const runtimeWorkdirHint = computed(
-  () => runDetail.value?.workdir ?? latestRun.value?.workdir ?? selectedRuntimeApi.value?.id ?? "",
-);
-const runtimeExecutionAreaHint = computed(() => {
-  const api = selectedRuntimeApi.value;
-  if (!api) {
-    return "";
-  }
-  return t("runtime.executionAreaHint", { apiId: api.id, workdir: runtimeWorkdirHint.value });
-});
 const elementLocale = computed(() => elementPlusLocales[currentLocale.value]);
 const selectedLocale = computed({
   get: () => currentLocale.value,
@@ -152,6 +138,10 @@ onMounted(() => {
   loadBootstrap().catch(showError);
 });
 
+onBeforeUnmount(() => {
+  closeRunEventsStream();
+});
+
 async function loadBootstrap() {
   loading.value = true;
   try {
@@ -166,16 +156,16 @@ async function loadBootstrap() {
     if (!runtimeApiId.value || !state.apis.some((api) => api.id === runtimeApiId.value)) {
       runtimeApiId.value = providerApis.value[0]?.id ?? "";
     }
-    refreshRuntimeVars();
+    await loadRuntimeHistory(false);
   } finally {
     loading.value = false;
   }
 }
 
-function providerChanged() {
+async function providerChanged() {
   runtimeApiId.value = providerApis.value[0]?.id ?? "";
   resetRuntimePanels();
-  refreshRuntimeVars();
+  await loadRuntimeHistory(false);
 }
 
 function selectPage(index: string) {
@@ -192,10 +182,6 @@ function formatDate(value: string) {
   return new Intl.DateTimeFormat(dateLocales[currentLocale.value], { dateStyle: "medium", timeStyle: "short" }).format(
     new Date(value),
   );
-}
-
-function formatJson(value: unknown, emptyText: string) {
-  return value === null || value === undefined ? emptyText : JSON.stringify(value, null, 2);
 }
 
 function formatExitCode(exitCode: number | undefined) {
@@ -220,6 +206,20 @@ function exitCodeStatusType(exitCode: number | undefined): ElementTagType {
     return "info";
   }
   return exitCode === 0 ? "success" : "danger";
+}
+
+function runEventStatus(event: TerraformRunEvent) {
+  return event.exitCode === undefined ? event.type : t("runtime.eventExitCode", { exitCode: event.exitCode });
+}
+
+function runEventStatusType(event: TerraformRunEvent): ElementTagType {
+  if (event.type === "succeeded" || event.exitCode === 0) {
+    return "success";
+  }
+  if (event.type === "failed" || (event.exitCode !== undefined && event.exitCode !== 0)) {
+    return "danger";
+  }
+  return "info";
 }
 
 function openKeyDialog(key?: PublicProviderKey) {
@@ -356,64 +356,41 @@ async function deleteResource(kind: ResourceKind, item: PublicProviderKey | Publ
   });
 }
 
-function refreshRuntimeVars() {
-  const template = selectedRuntimeTemplate.value;
-  if (!template) {
-    runtimeVarsJson.value = "{}";
-    return;
-  }
-  const vars = Object.fromEntries(
-    template.variables.map((variable) => [variable.name, variable.sensitive ? "" : variable.defaultValue ?? ""]),
+function buildRuntimeVars() {
+  return Object.fromEntries(
+    (selectedRuntimeTemplate.value?.variables ?? []).map((variable) => [variable.name, variable.defaultValue ?? ""]),
   );
-  runtimeVarsJson.value = JSON.stringify(vars, null, 2);
 }
 
-function runtimeApiChanged() {
+async function runtimeApiChanged() {
+  closeRunEventsStream();
   resetRuntimePanels();
-  refreshRuntimeVars();
-  refreshExamples(false);
+  await loadRuntimeHistory(false);
 }
 
 async function runtimeAction(action: DeploymentAction) {
   await runAction(async () => {
     const api = requireRuntimeApi();
-    const vars = parseStringRecord(runtimeVarsJson.value, t("form.varsJson"));
-    const result = await requestJson<TerraformRun>(`/ui/deployments/${encodeURIComponent(api.id)}/${action}`, {
+    closeRunEventsStream();
+    const result = await requestJson<TerraformRun>(`/ui/deployments/${encodeURIComponent(api.id)}/${action}/start`, {
       method: "POST",
-      body: JSON.stringify({ vars }),
+      body: JSON.stringify({ vars: buildRuntimeVars() }),
     });
-    latestRun.value = result;
-    runIdInput.value = result.id;
+    runDetail.value = result;
+    runEvents.value = [];
+    openRunEventsStream(api, result.id);
     await loadRuns(api, false);
-    ElMessage.success(t("message.runtimeFinished", { action, status: result.status }));
+    ElMessage.success(t("message.runtimeStarted", { action }));
   });
 }
 
-async function refreshStatus() {
-  await runAction(async () => {
-    const api = requireRuntimeApi();
-    const result = await requestJson<unknown>(`/ui/deployments/${encodeURIComponent(api.id)}/status`);
-    statusResult.value = result;
-    if (isStatusResponse(result)) {
-      latestRun.value = result.latestRun ?? null;
-    }
-    ElMessage.success(t("message.statusRefreshed"));
-  });
-}
-
-async function refreshOutput() {
-  await runAction(async () => {
-    const api = requireRuntimeApi();
-    outputResult.value = await requestJson<unknown>(`/ui/deployments/${encodeURIComponent(api.id)}/output`);
-    ElMessage.success(t("message.outputRefreshed"));
-  });
-}
-
-async function refreshRuns(showMessage = true) {
-  await runAction(async () => {
-    const api = requireRuntimeApi();
-    await loadRuns(api, showMessage);
-  });
+async function loadRuntimeHistory(showMessage = true) {
+  const api = selectedRuntimeApi.value;
+  if (!api) {
+    runList.value = null;
+    return;
+  }
+  await loadRuns(api, showMessage);
 }
 
 async function loadRuns(api: ApiPublication, showMessage: boolean) {
@@ -424,35 +401,11 @@ async function loadRuns(api: ApiPublication, showMessage: boolean) {
   }
 }
 
-async function refreshExamples(showMessage = true) {
-  await runAction(async () => {
-    const api = selectedRuntimeApi.value;
-    if (!api) {
-      examples.value = null;
-      return;
-    }
-    await loadExamples(api, showMessage);
-  });
-}
-
-async function loadExamples(api: ApiPublication, showMessage: boolean) {
-  examples.value = await requestJson<RuntimeCallExample>(`/ui/deployments/${encodeURIComponent(api.id)}/examples`);
-  if (showMessage) {
-    ElMessage.success(t("message.examplesRefreshed"));
-  }
-}
-
-async function viewRun(runIdOverride?: string) {
+async function viewRun(runId: string) {
   await runAction(async () => {
     const api = requireRuntimeApi();
-    const runId = (runIdOverride ?? runIdInput.value).trim();
-    if (!runId) {
-      throw new Error(t("error.runIdRequired"));
-    }
-    runIdInput.value = runId;
-    runDetail.value = await requestJson<TerraformRun>(
-      `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`,
-    );
+    closeRunEventsStream();
+    await loadRunDetail(api, runId);
     ElMessage.success(t("message.runDetailLoaded"));
   });
 }
@@ -461,19 +414,100 @@ function selectRun(row: TerraformRun) {
   void viewRun(row.id);
 }
 
+async function loadRunDetail(api: ApiPublication, runId: string) {
+  const encodedApiId = encodeURIComponent(api.id);
+  const encodedRunId = encodeURIComponent(runId);
+  const [run, events] = await Promise.all([
+    requestJson<TerraformRun>(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}`),
+    requestJson<TerraformRunEvent[]>(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events`),
+  ]);
+  runDetail.value = run;
+  runEvents.value = events;
+}
+
+function openRunEventsStream(api: ApiPublication, runId: string) {
+  const encodedApiId = encodeURIComponent(api.id);
+  const encodedRunId = encodeURIComponent(runId);
+  const stream = new EventSource(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events/stream`);
+  runEventsStream = stream;
+
+  for (const eventName of ["queued", "running", "command_started", "command_finished", "succeeded", "failed"] as const) {
+    stream.addEventListener(eventName, (message) => {
+      if (runEventsStream !== stream) {
+        return;
+      }
+      const event = JSON.parse((message as MessageEvent<string>).data) as TerraformRunEvent;
+      appendRunEvent(event);
+      if (event.type === "succeeded" || event.type === "failed") {
+        void finalizeRunStream(api, runId).catch(showError);
+      }
+    });
+  }
+
+  stream.onerror = () => {
+    if (runEventsStream !== stream) {
+      return;
+    }
+    void refreshTerminalRunAfterStreamError(api, runId).catch(showError);
+  };
+}
+
+function appendRunEvent(event: TerraformRunEvent) {
+  if (runEvents.value.some((existingEvent) => existingEvent.id === event.id)) {
+    return;
+  }
+  runEvents.value = [...runEvents.value, event];
+  if (runDetail.value?.id === event.runId && isRunStatusEvent(event)) {
+    runDetail.value = {
+      ...runDetail.value,
+      status: event.type,
+      updatedAt: event.createdAt,
+      exitCode: event.exitCode ?? runDetail.value.exitCode,
+    };
+  }
+}
+
+function isRunStatusEvent(
+  event: TerraformRunEvent,
+): event is TerraformRunEvent & { type: "queued" | "running" | "succeeded" | "failed" } {
+  return event.type === "queued" || event.type === "running" || event.type === "succeeded" || event.type === "failed";
+}
+
+async function refreshTerminalRunAfterStreamError(api: ApiPublication, runId: string) {
+  const run = await requestJson<TerraformRun>(
+    `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`,
+  );
+  if (run.status === "succeeded" || run.status === "failed" || run.status === "needs_attention") {
+    runDetail.value = run;
+    closeRunEventsStream();
+    await loadRuns(api, false);
+  }
+}
+
+async function finalizeRunStream(api: ApiPublication, runId: string) {
+  closeRunEventsStream();
+  const run = await requestJson<TerraformRun>(
+    `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`,
+  );
+  runDetail.value = run;
+  await loadRuns(api, false);
+  ElMessage.success(t("message.runtimeFinished", { action: run.action, status: run.status }));
+}
+
+function closeRunEventsStream() {
+  runEventsStream?.close();
+  runEventsStream = null;
+}
+
 async function logout() {
   await fetch("/logout", { method: "POST", credentials: "same-origin" });
   window.location.href = "/login";
 }
 
 function resetRuntimePanels() {
-  latestRun.value = null;
   runList.value = null;
-  examples.value = null;
-  statusResult.value = null;
-  outputResult.value = null;
   runDetail.value = null;
-  runIdInput.value = "";
+  runEvents.value = [];
 }
 
 function requireProvider(): ProviderType {
@@ -508,18 +542,6 @@ function parseTemplateVariables(text: string): TemplateVariable[] {
   });
 }
 
-function parseStringRecord(text: string, label: string): Record<string, string> {
-  const parsed = parseJson(text, label);
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error(t("error.jsonObject", { label }));
-  }
-  const entries = Object.entries(parsed);
-  if (!entries.every(([, value]) => typeof value === "string")) {
-    throw new Error(t("error.stringValues", { label }));
-  }
-  return Object.fromEntries(entries) as Record<string, string>;
-}
-
 function parseJson(text: string, label: string): unknown {
   try {
     return JSON.parse(text);
@@ -539,10 +561,6 @@ function isTemplateVariable(value: unknown): value is TemplateVariable {
     typeof candidate.sensitive === "boolean" &&
     (candidate.defaultValue === undefined || typeof candidate.defaultValue === "string")
   );
-}
-
-function isStatusResponse(value: unknown): value is { latestRun?: TerraformRun } {
-  return typeof value === "object" && value !== null && "latestRun" in value;
 }
 
 async function runAction(action: () => Promise<void>) {
@@ -705,29 +723,13 @@ function t(key: TranslationKey, params?: TranslationParams) {
                     <el-option v-for="api in providerApis" :key="api.id" :label="`${api.name} (${api.id})`" :value="api.id" />
                   </el-select>
                 </el-form-item>
-                <el-alert v-if="selectedRuntimeApi" class="form-tip" type="info" :closable="false" show-icon>
-                  <template #title>{{ t("runtime.executionArea") }}</template>
-                  {{ runtimeExecutionAreaHint }}
-                </el-alert>
-                <el-form-item :label="t('form.varsJson')">
-                  <el-input v-model="runtimeVarsJson" type="textarea" :rows="12" spellcheck="false" />
-                </el-form-item>
                 <el-space wrap>
                   <el-button type="primary" :disabled="deployDisabled" :loading="actionLoading" @click="runtimeAction('deploy')">{{ t("action.deploy") }}</el-button>
                   <el-button type="danger" :disabled="deleteDisabled" :loading="actionLoading" @click="runtimeAction('delete')">{{ t("action.terraformDelete") }}</el-button>
-                  <el-button :disabled="!selectedRuntimeApi" @click="refreshStatus">{{ t("action.status") }}</el-button>
-                  <el-button :disabled="!selectedRuntimeApi" @click="refreshOutput">{{ t("action.output") }}</el-button>
-                  <el-button :disabled="!selectedRuntimeApi" @click="refreshRuns(true)">{{ t("action.runs") }}</el-button>
-                  <el-button :disabled="!selectedRuntimeApi" @click="refreshExamples(true)">{{ t("action.examples") }}</el-button>
                 </el-space>
-                <el-divider />
-                <el-form-item :label="t('form.runId')">
-                  <el-input v-model="runIdInput" :placeholder="t('form.runIdPlaceholder')"><template #append><el-button :disabled="!selectedRuntimeApi" @click="viewRun">{{ t("action.viewRun") }}</el-button></template></el-input>
-                </el-form-item>
               </el-form>
             </el-card>
             <div class="runtime-panels">
-              <el-card shadow="never"><template #header>{{ t("panel.latestRun") }}</template><pre class="code-panel">{{ formatJson(latestRun, t("empty.latestRun")) }}</pre></el-card>
               <el-card shadow="never">
                 <template #header>{{ t("panel.runHistory") }}</template>
                 <el-table :data="runList ?? []" :empty-text="t('empty.runList')" stripe highlight-current-row @row-click="selectRun">
@@ -736,12 +738,8 @@ function t(key: TranslationKey, params?: TranslationParams) {
                   <el-table-column prop="status" :label="t('table.status')" width="150"><template #default="{ row }"><el-tag :type="runStatusType(row.status)">{{ row.status }}</el-tag></template></el-table-column>
                   <el-table-column prop="exitCode" :label="t('table.exitCode')" width="110"><template #default="{ row }"><el-tag :type="exitCodeStatusType(row.exitCode)">{{ formatExitCode(row.exitCode) }}</el-tag></template></el-table-column>
                   <el-table-column :label="t('table.revisionRun')" min-width="240"><template #default="{ row }"><div class="resource-name"><strong>{{ row.apiRevisionId }}</strong><small>{{ row.id }}</small></div></template></el-table-column>
-                  <el-table-column :label="t('table.actions')" width="120" fixed="right"><template #default="{ row }"><el-button size="small" @click.stop="viewRun(row.id)">{{ t("action.viewRun") }}</el-button></template></el-table-column>
                 </el-table>
               </el-card>
-              <el-card shadow="never"><template #header>{{ t("panel.externalExamples") }}</template><pre class="code-panel">{{ formatJson(examples, t("empty.examples")) }}</pre></el-card>
-              <el-card shadow="never"><template #header>{{ t("panel.status") }}</template><pre class="code-panel">{{ formatJson(statusResult, t("empty.status")) }}</pre></el-card>
-              <el-card shadow="never"><template #header>{{ t("panel.output") }}</template><pre class="code-panel">{{ formatJson(outputResult, t("empty.output")) }}</pre></el-card>
               <el-card shadow="never">
                 <template #header>{{ t("panel.runDetail") }}</template>
                 <template v-if="runDetail">
@@ -752,22 +750,17 @@ function t(key: TranslationKey, params?: TranslationParams) {
                     <el-descriptions-item :label="t('table.status')"><el-tag :type="runStatusType(runDetail.status)">{{ runDetail.status }}</el-tag></el-descriptions-item>
                     <el-descriptions-item :label="t('table.exitCode')"><el-tag :type="exitCodeStatusType(runDetail.exitCode)">{{ formatExitCode(runDetail.exitCode) }}</el-tag></el-descriptions-item>
                     <el-descriptions-item :label="t('table.created')">{{ formatDate(runDetail.createdAt) }}</el-descriptions-item>
-                    <el-descriptions-item :label="t('runtime.workdir')" :span="2">{{ runDetail.workdir ?? runtimeWorkdirHint }}</el-descriptions-item>
+                    <el-descriptions-item :label="t('runtime.workdir')" :span="2">{{ runDetail.workdir ?? selectedRuntimeApi?.id }}</el-descriptions-item>
                   </el-descriptions>
                   <el-divider />
-                  <el-empty v-if="!runDetail.commandResults?.length" :description="t('empty.commandResults')" :image-size="52" />
-                  <template v-else>
-                    <div v-for="(result, index) in runDetail.commandResults" :key="`${result.step}-${index}`" class="runtime-command-result">
-                      <div class="workbench-header">
-                        <div>
-                          <h3 class="workbench-title">{{ result.step }}</h3>
-                          <p class="workbench-copy">{{ t("runtime.commandStatus", { status: result.exitCode === 0 ? t("runtime.commandSucceeded") : t("runtime.commandFailed"), exitCode: result.exitCode }) }}</p>
-                        </div>
-                        <el-tag :type="exitCodeStatusType(result.exitCode)">{{ formatExitCode(result.exitCode) }}</el-tag>
-                      </div>
-                      <pre class="code-panel command-output">{{ result.output }}</pre>
-                    </div>
-                  </template>
+                  <el-empty v-if="runEvents.length === 0" :description="t('empty.runEvents')" :image-size="52" />
+                  <el-table v-else :data="runEvents" :empty-text="t('empty.runEvents')" stripe>
+                    <el-table-column prop="createdAt" :label="t('table.time')" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
+                    <el-table-column prop="type" :label="t('table.type')" min-width="160"><template #default="{ row }"><el-tag type="info">{{ row.type }}</el-tag></template></el-table-column>
+                    <el-table-column prop="step" :label="t('table.step')" min-width="120"><template #default="{ row }">{{ row.step ?? "-" }}</template></el-table-column>
+                    <el-table-column :label="t('table.status')" min-width="140"><template #default="{ row }"><el-tag :type="runEventStatusType(row)">{{ runEventStatus(row) }}</el-tag></template></el-table-column>
+                    <el-table-column :label="t('table.output')" min-width="260"><template #default="{ row }"><pre v-if="row.output" class="muted">{{ row.output }}</pre></template></el-table-column>
+                  </el-table>
                 </template>
                 <el-empty v-else :description="t('empty.runDetail')" :image-size="52" />
               </el-card>

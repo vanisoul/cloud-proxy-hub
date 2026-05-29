@@ -99,6 +99,26 @@ export type TerraformRun = {
   }>;
 };
 
+export type TerraformRunEventType =
+  | "queued"
+  | "running"
+  | "command_started"
+  | "command_finished"
+  | "succeeded"
+  | "failed";
+
+export type TerraformRunEvent = {
+  id: string;
+  apiId: string;
+  runId: string;
+  createdAt: string;
+  type: TerraformRunEventType;
+  step?: NonNullable<TerraformRun["commandResults"]>[number]["step"];
+  exitCode?: number;
+  message?: string;
+  output?: string;
+};
+
 export type RuntimeCallExample = {
   apiId: string;
   apiRevisionId: string;

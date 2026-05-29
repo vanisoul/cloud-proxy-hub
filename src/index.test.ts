@@ -70,15 +70,11 @@ describe("Admin SPA contract", () => {
     const app = await Bun.file("web/src/App.vue").text();
 
     expect(app).toContain("async function saveKey() {\n  await runAction(async () => {\n    const provider = requireProvider();");
-    expect(app).toContain("async function refreshStatus() {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
-    expect(app).toContain("async function refreshOutput() {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
-    expect(app).toContain("async function refreshRuns(showMessage = true) {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
-    expect(app).toContain("async function viewRun(runIdOverride?: string) {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
+    expect(app).toContain("async function runtimeAction(action: DeploymentAction) {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
+    expect(app).toContain("async function viewRun(runId: string) {\n  await runAction(async () => {\n    const api = requireRuntimeApi();");
     expect(app).toContain('throw new Error(t("error.allowedActionRequired"))');
-    expect(app).toContain('throw new Error(t("error.runIdRequired"))');
     expect(app).toContain('throw new Error(t("error.selectProvider"))');
     expect(app).toContain('throw new Error(t("error.selectRuntimeApi"))');
-    expect(app).toContain('parseStringRecord(runtimeVarsJson.value, t("form.varsJson"))');
     expect(app).toContain('return JSON.parse(text);');
     expect(app).toContain('throw new Error(t("error.invalidJson", { label }));');
     expect(app).toContain("const confirmed = await confirmDelete(item.name);");
@@ -119,21 +115,48 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(webSource).not.toContain("authorization");
   });
 
-  it("defines runtime history, CLI output, and redacted event routes", async () => {
+  it("defines focused runtime history, live events, and redacted event routes", async () => {
     const app = await Bun.file("web/src/App.vue").text();
     const server = await Bun.file("src/index.ts").text();
     const storage = await Bun.file("src/storage.ts").text();
 
     expect(app).toContain('const runList = ref<TerraformRun[] | null>(null);');
+    expect(app).toContain('const runEvents = ref<TerraformRunEvent[]>([]);');
     expect(app).toContain('<el-table :data="runList ?? []"');
     expect(app).toContain('t("panel.runHistory")');
-    expect(app).toContain('class="code-panel command-output"');
-    expect(app).toContain('runtime.executionAreaHint');
+    expect(app).toContain('new EventSource(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events/stream`)');
+    expect(app).toContain('`/ui/deployments/${encodeURIComponent(api.id)}/${action}/start`');
+    expect(app).toContain('requestJson<TerraformRunEvent[]>(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events`)');
+    expect(app).not.toContain('async function refreshStatus()');
+    expect(app).not.toContain('async function refreshOutput()');
+    expect(app).not.toContain('async function refreshExamples()');
+    expect(app).not.toContain('runtimeVarsJson');
+    expect(app).not.toContain('runIdInput');
+    expect(app).not.toContain('panel.latestRun');
+    expect(app).not.toContain('panel.externalExamples');
+    expect(app).not.toContain('panel.status');
+    expect(app).not.toContain('panel.output');
+    expect(app).not.toContain('formatJson');
+    expect(server).toContain('"/ui/deployments/:apiId/deploy/start"');
+    expect(server).toContain('"/ui/deployments/:apiId/delete/start"');
     expect(server).toContain('"/ui/deployments/:apiId/runs/:runId/events"');
     expect(server).toContain('"/api/deployments/:apiId/runs/:runId/events"');
     expect(server).toContain('"/ui/deployments/:apiId/runs/:runId/events/stream"');
     expect(server).toContain('"content-type": "text/event-stream; charset=utf-8"');
     expect(storage).toContain('events.redacted.ndjson');
+  });
+
+  it("keeps API deploy routes synchronous while adding UI async start routes", async () => {
+    const server = await Bun.file("src/index.ts").text();
+
+    expect(server).toContain('"/ui/deployments/:apiId/deploy/start"');
+    expect(server).toContain('terraform.startDeploy(await store.getApi(params.apiId), body)');
+    expect(server).toContain('"/ui/deployments/:apiId/delete/start"');
+    expect(server).toContain('terraform.startDelete(await store.getApi(params.apiId), body)');
+    expect(server).toContain('"/api/deployments/:apiId/deploy"');
+    expect(server).toContain('terraform.deploy(await store.getApi(params.apiId), body)');
+    expect(server).toContain('"/api/deployments/:apiId/delete"');
+    expect(server).toContain('terraform.delete(await store.getApi(params.apiId), body)');
   });
 
   it("redirects unauthenticated root requests to login", async () => {

@@ -35,11 +35,21 @@ export class TerraformService {
   }
 
   async deploy(api: ApiPublication, input: RunInput) {
-    return this.createRun(api, "deploy", input);
+    const preparedRun = await this.createRun(api, "deploy", input);
+    return this.executePreparedRun(preparedRun);
   }
 
   async delete(api: ApiPublication, input: RunInput) {
-    return this.createRun(api, "delete", input);
+    const preparedRun = await this.createRun(api, "delete", input);
+    return this.executePreparedRun(preparedRun);
+  }
+
+  async startDeploy(api: ApiPublication, input: RunInput) {
+    return this.startRun(api, "deploy", input);
+  }
+
+  async startDelete(api: ApiPublication, input: RunInput) {
+    return this.startRun(api, "delete", input);
   }
 
   async validateTemplate(input: TerraformTemplateInput) {
@@ -94,7 +104,7 @@ export class TerraformService {
     return { apiId, outputs: redactTerraformOutputs(parseOutputJson(result.output)), latestRun };
   }
 
-  private async createRun(api: ApiPublication, action: DeploymentAction, input: RunInput): Promise<TerraformRun> {
+  private async createRun(api: ApiPublication, action: DeploymentAction, input: RunInput): Promise<PreparedRun> {
     if (!api.allowedActions.includes(action)) {
       throw new Error(`Action ${action} is not allowed for API ${api.id}`);
     }
@@ -140,9 +150,27 @@ export class TerraformService {
 
       await this.store.saveRun(run);
       await this.store.appendRunEvent(run.apiId, run.id, { type: "queued", message: `${action} queued` });
-      return await this.execute(run, api, executionVars);
-    } finally {
+      return { api, executionVars, run };
+    } catch (error) {
       this.activeApiRuns.delete(api.id);
+      throw error;
+    }
+  }
+
+  private async startRun(api: ApiPublication, action: DeploymentAction, input: RunInput): Promise<TerraformRun> {
+    const preparedRun = await this.createRun(api, action, input);
+    void this.executePreparedRun(preparedRun).catch(() => undefined);
+    return preparedRun.run;
+  }
+
+  private async executePreparedRun(preparedRun: PreparedRun): Promise<TerraformRun> {
+    try {
+      return await this.execute(preparedRun.run, preparedRun.api, preparedRun.executionVars);
+    } catch (error) {
+      await this.persistUnexpectedFailure(preparedRun.run, error);
+      throw error;
+    } finally {
+      this.activeApiRuns.delete(preparedRun.run.apiId);
     }
   }
 
@@ -266,7 +294,28 @@ export class TerraformService {
     });
     return failed;
   }
+
+  private async persistUnexpectedFailure(run: TerraformRun, error: unknown) {
+    const output = error instanceof Error ? error.message : String(error);
+    const failed = updateRun(run, "failed", 1, output, []);
+    try {
+      await writeFile(this.store.runPath(run.apiId, run.id, "logs.redacted.txt"), output, { mode: 0o600 });
+      await this.store.saveRun(failed);
+      await this.store.appendRunEvent(run.apiId, run.id, {
+        type: "failed",
+        exitCode: 1,
+        message: `${run.action} failed`,
+        output,
+      });
+    } catch {}
+  }
 }
+
+type PreparedRun = {
+  api: ApiPublication;
+  executionVars: Record<string, string>;
+  run: TerraformRun;
+};
 
 function updateRun(
   run: TerraformRun,

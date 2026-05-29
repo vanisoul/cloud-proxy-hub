@@ -379,6 +379,42 @@ describe("PlatformStore", () => {
     }
   });
 
+  it("starts deploys asynchronously while events persist through terminal status", async () => {
+    const terraform = await createRuntimeFixture(undefined, "", "", "apply");
+    const api = await store.getApi("safe-api");
+    const startedAt = Date.now();
+    const run = await terraform.startDeploy(api, {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const startElapsedMs = Date.now() - startedAt;
+    const immediate = await store.getRun("safe-api", run.id);
+
+    expect(startElapsedMs).toBeLessThan(500);
+    expect(run.status).toBe("queued");
+    expect(["queued", "running"]).toContain(immediate.status);
+    expect(immediate.workdir).toBe("data/apis/safe-api");
+    expect(immediate.artifactsDir).toBe(`data/apis/safe-api/runs/${run.id}`);
+
+    const finished = await waitForLatestRunStatus(terraform, "safe-api", "succeeded");
+    const events = await store.listRunEvents("safe-api", run.id);
+    const deleteRun = await terraform.delete(api, { vars: { token: "super-secret", name: "demo" } });
+
+    expect(finished.latestRun?.id).toBe(run.id);
+    expect(finished.latestRun?.status).toBe("succeeded");
+    expect(events.map((event) => event.type)).toEqual([
+      "queued",
+      "running",
+      "command_started",
+      "command_finished",
+      "command_started",
+      "command_finished",
+      "command_started",
+      "command_finished",
+      "succeeded",
+    ]);
+    expect(deleteRun.status).toBe("succeeded");
+  });
+
 
 
   it("executes the API revision passed to Terraform even after republish", async () => {
@@ -683,12 +719,12 @@ async function saveGoogleTemplate() {
 
 async function waitForLatestRunStatus(
   terraform: {
-    status(apiId: string): Promise<{ latestRun?: { status?: string; workdir?: string; artifactsDir?: string } }>;
+    status(apiId: string): Promise<{ latestRun?: { id?: string; status?: string; workdir?: string; artifactsDir?: string } }>;
   },
   apiId: string,
-  expectedStatus: "running",
+  expectedStatus: "running" | "succeeded" | "failed",
 ) {
-  const timeoutMs = 1000;
+  const timeoutMs = 2000;
   const intervalMs = 25;
   const deadline = Date.now() + timeoutMs;
 
