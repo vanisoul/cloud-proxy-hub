@@ -30,6 +30,7 @@ import type {
 type PageKey = "dashboard" | "keys" | "templates" | "apis" | "runtime";
 type ResourceKind = "key" | "template" | "api";
 type ElementTagType = "primary" | "success" | "warning" | "danger" | "info";
+type DisplayRunEvent = TerraformRunEvent & { groupedEventIds: string[] };
 
 type KeyForm = {
   name: string;
@@ -84,7 +85,7 @@ const runList = ref<TerraformRun[] | null>(null);
 const runDetail = ref<TerraformRun | null>(null);
 const runEvents = ref<TerraformRunEvent[]>([]);
 const runtimeRunDialogVisible = ref(false);
-const selectedRunEvent = ref<TerraformRunEvent | null>(null);
+const selectedRunEventId = ref("");
 const currentLocale = ref<LocaleKey>(loadSavedLocale());
 const templateFiles = ref<Record<string, string>>({ "main.tf": sampleTemplate });
 let runEventsStream: EventSource | null = null;
@@ -111,6 +112,28 @@ const selectedRuntimeTemplate = computed(() => selectedRuntimeApi.value?.snapsho
 const deployDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("deploy"));
 const deleteDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("delete"));
 const activeRunLoading = computed(() => runDetail.value?.status === "queued" || runDetail.value?.status === "running");
+const runEventDisplayRows = computed<DisplayRunEvent[]>(() => {
+  const rows: DisplayRunEvent[] = [];
+
+  for (const event of runEvents.value) {
+    const previous = rows[rows.length - 1];
+    if (previous && canGroupRunEvent(previous, event)) {
+      rows[rows.length - 1] = {
+        ...previous,
+        groupedEventIds: [...previous.groupedEventIds, event.id],
+        output: `${previous.output ?? ""}${event.output ?? ""}`,
+      };
+      continue;
+    }
+
+    rows.push({ ...event, groupedEventIds: [event.id] });
+  }
+
+  return rows;
+});
+const selectedRunEvent = computed(
+  () => runEventDisplayRows.value.find((event) => event.id === selectedRunEventId.value) ?? null,
+);
 const runtimeRunDialogTitle = computed(() => {
   if (!runDetail.value) {
     return t("panel.runDetail");
@@ -233,12 +256,21 @@ function runEventStatusType(event: TerraformRunEvent): ElementTagType {
   return "info";
 }
 
-function selectRunEvent(event: TerraformRunEvent) {
+function canGroupRunEvent(previous: TerraformRunEvent, event: TerraformRunEvent) {
+  return (
+    previous.type === "command_output" &&
+    event.type === "command_output" &&
+    previous.step === event.step &&
+    previous.message === event.message
+  );
+}
+
+function selectRunEvent(event: DisplayRunEvent) {
   if (!event.output) {
-    selectedRunEvent.value = null;
+    selectedRunEventId.value = "";
     return;
   }
-  selectedRunEvent.value = event;
+  selectedRunEventId.value = event.id;
 }
 
 function openKeyDialog(key?: PublicProviderKey) {
@@ -401,7 +433,7 @@ async function runtimeAction(action: DeploymentAction) {
     }
     runDetail.value = result;
     runEvents.value = [];
-    selectedRunEvent.value = null;
+    selectedRunEventId.value = "";
     runtimeRunDialogVisible.value = true;
     openRunEventsStream(api, result.id, seq);
     await loadRuns(api, false, seq);
@@ -458,7 +490,7 @@ async function loadRunDetail(api: ApiPublication, runId: string, seq = runtimeRe
   }
   runDetail.value = run;
   runEvents.value = events;
-  selectedRunEvent.value = null;
+  selectedRunEventId.value = "";
   return true;
 }
 
@@ -560,7 +592,7 @@ function resetRuntimePanels() {
   runList.value = null;
   runDetail.value = null;
   runEvents.value = [];
-  selectedRunEvent.value = null;
+  selectedRunEventId.value = "";
   runtimeRunDialogVisible.value = false;
 }
 
@@ -847,7 +879,7 @@ function t(key: TranslationKey, params?: TranslationParams) {
   </el-dialog>
 
   <el-dialog v-model="runtimeRunDialogVisible" :title="runtimeRunDialogTitle" width="920px">
-    <div v-if="runDetail" v-loading="activeRunLoading" :element-loading-text="t('runtime.runLoading')">
+    <div v-if="runDetail">
       <el-alert v-if="activeRunLoading" class="form-tip" :title="t('runtime.runLoading')" type="info" show-icon :closable="false" />
       <el-descriptions :column="2" border>
         <el-descriptions-item :label="t('table.runId')">{{ runDetail.id }}</el-descriptions-item>
@@ -860,12 +892,12 @@ function t(key: TranslationKey, params?: TranslationParams) {
       </el-descriptions>
       <el-divider />
       <el-empty v-if="runEvents.length === 0" :description="t('empty.runEvents')" :image-size="52" />
-      <el-table v-else :data="runEvents" :empty-text="t('empty.runEvents')" stripe highlight-current-row @row-click="selectRunEvent">
+      <el-table v-else :data="runEventDisplayRows" :empty-text="t('empty.runEvents')" stripe highlight-current-row>
         <el-table-column prop="createdAt" :label="t('table.time')" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
         <el-table-column prop="type" :label="t('table.type')" min-width="160"><template #default="{ row }"><el-tag type="info">{{ row.type }}</el-tag></template></el-table-column>
         <el-table-column prop="step" :label="t('table.step')" min-width="120"><template #default="{ row }">{{ row.step ?? "-" }}</template></el-table-column>
         <el-table-column :label="t('table.status')" min-width="140"><template #default="{ row }"><el-tag :type="runEventStatusType(row)">{{ runEventStatus(row) }}</el-tag></template></el-table-column>
-        <el-table-column :label="t('table.output')" width="120"><template #default="{ row }"><el-button v-if="row.output" text type="primary" @click="selectRunEvent(row)">{{ t("runtime.viewOutput") }}</el-button><span v-else>-</span></template></el-table-column>
+        <el-table-column :label="t('table.output')" width="120"><template #default="{ row }"><el-button v-if="row.output" text type="primary" @click.stop="selectRunEvent(row)">{{ t("runtime.viewOutput") }}</el-button><span v-else>-</span></template></el-table-column>
       </el-table>
       <el-divider />
       <el-empty v-if="!selectedRunEvent" :description="t('runtime.selectEventOutput')" :image-size="52" />
