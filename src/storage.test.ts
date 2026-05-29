@@ -85,9 +85,26 @@ describe("PlatformStore", () => {
     const file = await Bun.file(`${testRoot}/config/templates/aliyun-alicloud/safe/files/main.tf`).text();
 
     expect(template.fileNames).toEqual(["main.tf"]);
+    expect(template.resourceAddresses).toEqual(["terraform_data.x"]);
     expect(metadata.name).toBe("Safe");
     expect(metadata.files).toBeUndefined();
     expect(file).toContain("terraform_data");
+  });
+
+  it("stores provider-scoped shell resources as metadata", async () => {
+    await store.initialize();
+    const shell = await saveInitShell();
+    const listed = await store.listShells("aliyun-alicloud");
+    const loaded = await store.getShell("aliyun-alicloud", "init-shell");
+    const metadata = await Bun.file(`${testRoot}/config/shells/aliyun-alicloud/init-shell/metadata.json`).json();
+
+    expect(shell.inline).toEqual(["printf 'init shell ok\\n'"]);
+    expect(listed.map((item) => item.id)).toEqual(["init-shell"]);
+    expect(loaded).not.toHaveProperty("connection");
+    expect(loaded).not.toHaveProperty("dependsOn");
+    expect(metadata).toMatchObject({ providerTypeId: "aliyun-alicloud", name: "Init shell" });
+    expect(metadata.connection).toBeUndefined();
+    expect(metadata.dependsOn).toBeUndefined();
   });
 
   it("stores raw main.tf templates and blocks unsafe provider constructs", async () => {
@@ -103,6 +120,7 @@ describe("PlatformStore", () => {
     const file = await Bun.file(`${testRoot}/config/templates/aliyun-alicloud/raw-main/files/main.tf`).text();
 
     expect(template.fileNames).toEqual(["main.tf"]);
+    expect(template.resourceAddresses).toEqual(["terraform_data.x"]);
     expect(file).toBe('resource "terraform_data" "x" {}');
     await expectRejects(
       store.saveTemplate({
@@ -172,6 +190,172 @@ describe("PlatformStore", () => {
     expect(api.templateId).toBe("safe");
     expect(apis).toHaveLength(1);
     expect(metadata).toMatchObject({ providerTypeId: "aliyun-alicloud", keyId: "aliyun-main", templateId: "safe" });
+  });
+
+  it("publishes APIs with optional shell snapshots", async () => {
+    await createConfigFixture();
+    await saveInitShell();
+    await saveShellTemplate();
+    await store.saveTemplate({
+      id: "no-auth-shell-safe",
+      name: "No auth shell safe",
+      providerTypeId: "aliyun-alicloud",
+      version: "1.0.0",
+      variables: [{ name: "user", required: true, sensitive: false }],
+      files: { "main.tf": 'resource "terraform_data" "x" {}' },
+    });
+    const api = await saveShellApi();
+    const metadata = await Bun.file(`${testRoot}/config/apis/aliyun-alicloud/shell-api/metadata.json`).json();
+
+    expect(api.shellId).toBe("init-shell");
+    expect(api.snapshot.shell?.id).toBe("init-shell");
+    expect(api.snapshot.shell?.inline).toEqual(["printf 'init shell ok\\n'"]);
+    expect(api.shellId).toBe("init-shell");
+    expect(metadata.shellId).toBe("init-shell");
+    expect(metadata.shellBinding.shellId).toBe("init-shell");
+    expect(metadata.snapshot.shell.startupVariable).toBe("user_data");
+  });
+
+  it("rejects shell API publish when the template lacks a provider startup variable", async () => {
+    await createConfigFixture();
+    await saveInitShell();
+
+    await expectRejects(
+      store.saveApi({
+        id: "missing-startup-api",
+        providerTypeId: "aliyun-alicloud",
+        name: "Missing startup API",
+        keyId: "aliyun-main",
+        templateId: "safe",
+        shellBinding: shellBinding(),
+        allowedActions: ["deploy"],
+      }),
+      "requires template variable user_data",
+    );
+  });
+
+  it("rejects Aliyun shell APIs when the template only exposes non-Aliyun startup variables", async () => {
+    await createConfigFixture();
+    await saveInitShell();
+    await store.saveTemplate({
+      id: "aliyun-wrong-startup",
+      name: "Aliyun wrong startup",
+      providerTypeId: "aliyun-alicloud",
+      version: "1.0.0",
+      variables: [
+        { name: "name", required: true, sensitive: false },
+        { name: "startup_script", required: false, sensitive: false },
+      ],
+      files: { "main.tf": 'resource "alicloud_instance" "vm" { user_data = var.startup_script }' },
+    });
+
+    await expectRejects(
+      store.saveApi({
+        id: "aliyun-wrong-startup-api",
+        providerTypeId: "aliyun-alicloud",
+        name: "Aliyun Wrong Startup API",
+        keyId: "aliyun-main",
+        templateId: "aliyun-wrong-startup",
+        shellBinding: shellBinding(),
+        allowedActions: ["deploy"],
+      }),
+      "requires template variable user_data",
+    );
+  });
+
+  it("uses Google startup_script when publishing shell APIs for Google", async () => {
+    await createConfigFixture();
+    await saveGoogleKey();
+    await store.saveShell({
+      id: "google-init-shell",
+      providerTypeId: "google",
+      name: "Google init shell",
+      inline: ["printf 'google init ok\\n'"],
+    });
+    await store.saveTemplate({
+      id: "google-shell-safe",
+      name: "Google shell safe",
+      providerTypeId: "google",
+      version: "1.0.0",
+      variables: [
+        { name: "name", required: true, sensitive: false },
+        { name: "startup_script", required: false, sensitive: false },
+      ],
+      files: { "main.tf": 'resource "google_compute_instance" "vm" {}' },
+    });
+
+    const api = await store.saveApi({
+      id: "google-shell-api",
+      providerTypeId: "google",
+      name: "Google Shell API",
+      keyId: "google-main",
+      templateId: "google-shell-safe",
+      shellBinding: shellBinding({ shellId: "google-init-shell" }),
+      allowedActions: ["deploy"],
+    });
+
+    expect(api.snapshot.shell?.startupVariable).toBe("startup_script");
+  });
+
+  it("rejects Google shell APIs when the template only exposes non-Google startup variables", async () => {
+    await createConfigFixture();
+    await saveGoogleKey();
+    await store.saveShell({
+      id: "google-init-shell",
+      providerTypeId: "google",
+      name: "Google init shell",
+      inline: ["printf 'google init ok\n'"],
+    });
+    await store.saveTemplate({
+      id: "google-wrong-startup",
+      name: "Google wrong startup",
+      providerTypeId: "google",
+      version: "1.0.0",
+      variables: [
+        { name: "name", required: true, sensitive: false },
+        { name: "user_data", required: false, sensitive: false },
+      ],
+      files: { "main.tf": 'resource "google_compute_instance" "vm" {}' },
+    });
+
+    await expectRejects(
+      store.saveApi({
+        id: "google-wrong-startup-api",
+        providerTypeId: "google",
+        name: "Google Wrong Startup API",
+        keyId: "google-main",
+        templateId: "google-wrong-startup",
+        shellBinding: shellBinding({ shellId: "google-init-shell" }),
+        allowedActions: ["deploy"],
+      }),
+      "requires template variable startup_script",
+    );
+  });
+
+  it("publishes APIs without shell resources", async () => {
+    await createConfigFixture();
+    const api = await saveSafeApi();
+
+    expect(api.shellId).toBeUndefined();
+    expect(api.snapshot.shell).toBeUndefined();
+  });
+
+  it("hydrates shell binding from legacy API snapshots", async () => {
+    await createConfigFixture();
+    await saveInitShell();
+    await saveShellTemplate();
+    const api = await saveShellApi();
+    const metadataPath = `${testRoot}/config/apis/aliyun-alicloud/shell-api/metadata.json`;
+    const metadata = await Bun.file(metadataPath).json();
+    delete metadata.shellBinding;
+    await Bun.write(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+
+    const loaded = await store.getApi(api.id);
+    const listed = await store.listApis("aliyun-alicloud");
+
+    expect(loaded.shellId).toBe("init-shell");
+    expect(loaded.shellBinding).toEqual(shellBinding());
+    expect(listed.find((item) => item.id === api.id)?.shellBinding).toEqual(shellBinding());
   });
 
 
@@ -254,10 +438,14 @@ describe("PlatformStore", () => {
 
   it("rejects provider mismatches and referenced resource deletion", async () => {
     await createConfigFixture();
+    await saveInitShell();
+    await saveShellTemplate();
     await saveSafeApi();
+    await saveShellApi();
 
     await expectRejects(store.deleteKey("aliyun-alicloud", "aliyun-main"), "referenced by API");
     await expectRejects(store.deleteTemplate("aliyun-alicloud", "safe"), "referenced by API");
+    await expectRejects(store.deleteShell("aliyun-alicloud", "init-shell"), "referenced by API");
     await expectRejects(
       store.saveApi({
         id: "bad-api",
@@ -265,6 +453,7 @@ describe("PlatformStore", () => {
         name: "Bad API",
         keyId: "aliyun-main",
         templateId: "safe",
+        shellBinding: shellBinding(),
         allowedActions: ["deploy"],
       }),
     );
@@ -306,6 +495,71 @@ describe("PlatformStore", () => {
     expect(log).toContain("ADMIN_API_KEY=unset");
     expect(log).not.toContain("super-secret");
     expect(versions).toContain('source = "aliyun/alicloud"');
+  });
+
+  it("injects shell commands into the provider startup variable during deploy", async () => {
+    const terraform = await createRuntimeFixture();
+    const api = await store.getApi("shell-api");
+    const run = await terraform.deploy(api, {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const tfvars = await Bun.file(`${testRoot}/data/apis/shell-api/terraform.tfvars.json`).json();
+    const log = await Bun.file(`${testRoot}/data/apis/shell-api/runs/${run.id}/logs.redacted.txt`).text();
+    const events = await store.listRunEvents("shell-api", run.id);
+
+    expect(run.status).toBe("succeeded");
+    expect(run.shellId).toBe("init-shell");
+    expect(tfvars.user_data).toBe("printf 'init shell ok\\n'\n");
+    expect(await Bun.file(`${testRoot}/data/apis/shell-api/platform-shell.tf`).exists()).toBe(false);
+    expect(log).toContain("fake terraform apply ok");
+    expect(events.some((event) => event.type === "command_output" && event.step === "apply")).toBe(true);
+  });
+
+  it("lets selected shell override caller-provided startup variable values", async () => {
+    const terraform = await createRuntimeFixture();
+    const api = await store.getApi("shell-api");
+
+    await terraform.deploy(api, {
+      vars: { token: "super-secret", name: "demo", user_data: "caller value" },
+    });
+    const tfvars = await Bun.file(`${testRoot}/data/apis/shell-api/terraform.tfvars.json`).json();
+
+    expect(tfvars.user_data).toBe("printf 'init shell ok\\n'\n");
+  });
+
+  it("writes shell commands to startup variables without Terraform interpolation escaping", async () => {
+    const terraform = await createRuntimeFixture();
+    await store.saveShell({
+      id: "escaped-shell",
+      providerTypeId: "aliyun-alicloud",
+      name: "Escaped shell",
+      inline: ['printf "${var.private_key} %{if true}unsafe%{endif}"'],
+    });
+    const api = await store.saveApi({
+      id: "escaped-api",
+      providerTypeId: "aliyun-alicloud",
+      name: "Escaped API",
+      keyId: "aliyun-main",
+      templateId: "shell-safe",
+      shellBinding: shellBinding({ shellId: "escaped-shell" }),
+      allowedActions: ["deploy"],
+    });
+
+    await terraform.deploy(api, {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const tfvars = await Bun.file(`${testRoot}/data/apis/escaped-api/terraform.tfvars.json`).json();
+
+    expect(tfvars.user_data).toBe('printf "${var.private_key} %{if true}unsafe%{endif}"\n');
+  });
+
+  it("does not generate shell configuration when an API has no shell", async () => {
+    const terraform = await createRuntimeFixture();
+    await terraform.deploy(await store.getApi("safe-api"), {
+      vars: { token: "super-secret", name: "demo" },
+    });
+
+    expect(await Bun.file(`${testRoot}/data/apis/safe-api/platform-shell.tf`).exists()).toBe(false);
   });
 
   it("reuses a stable API Terraform workdir and returns command details", async () => {
@@ -664,6 +918,9 @@ async function createRuntimeFixture(
 ) {
   await createConfigFixture();
   await saveSafeApi();
+  await saveInitShell();
+  await saveShellTemplate();
+  await saveShellApi();
   const terraformBin = `${testRoot}/terraform-${crypto.randomUUID()}.sh`;
   await Bun.write(
     terraformBin,
@@ -758,6 +1015,51 @@ async function saveSafeApi() {
     templateId: "safe",
     allowedActions: ["deploy", "delete"],
   });
+}
+
+async function saveInitShell() {
+  return store.saveShell({
+    id: "init-shell",
+    providerTypeId: "aliyun-alicloud",
+    name: "Init shell",
+    description: "Bootstrap commands",
+    inline: ["printf 'init shell ok\\n'"],
+  });
+}
+
+async function saveShellTemplate() {
+  return store.saveTemplate({
+    id: "shell-safe",
+    name: "Shell safe",
+    providerTypeId: "aliyun-alicloud",
+    version: "1.0.0",
+    variables: [
+      { name: "name", required: true, sensitive: false },
+      { name: "token", required: true, sensitive: true },
+      { name: "user_data", required: false, sensitive: false },
+    ],
+    files: { "main.tf": 'resource "alicloud_instance" "vm" { user_data = var.user_data }' },
+  });
+}
+
+async function saveShellApi() {
+  return store.saveApi({
+    id: "shell-api",
+    providerTypeId: "aliyun-alicloud",
+    name: "Shell API",
+    keyId: "aliyun-main",
+    templateId: "shell-safe",
+    shellBinding: shellBinding(),
+    allowedActions: ["deploy"],
+  });
+}
+
+function shellBinding(overrides: Partial<{
+  shellId: string;
+}> = {}) {
+  return {
+    shellId: overrides.shellId ?? "init-shell",
+  };
 }
 
 async function saveGoogleKey() {

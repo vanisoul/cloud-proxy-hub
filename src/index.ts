@@ -45,11 +45,23 @@ const templateSchema = t.Object({
   files: t.Optional(stringRecord),
 });
 
+const shellSchema = t.Object({
+  id: t.Optional(idSchema),
+  name: t.String({ minLength: 1 }),
+  description: t.Optional(t.String()),
+  inline: t.Array(t.String({ minLength: 1 }), { minItems: 1 }),
+});
+
+const shellBindingSchema = t.Object({
+  shellId: idSchema,
+});
+
 const apiSchema = t.Object({
   id: t.Optional(idSchema),
   name: t.String({ minLength: 1 }),
   keyId: idSchema,
   templateId: idSchema,
+  shellBinding: t.Optional(shellBindingSchema),
   allowedActions: t.Array(t.Union([t.Literal("deploy"), t.Literal("delete")])),
 });
 
@@ -147,6 +159,7 @@ const app = new Elysia()
     providerTypes: await store.listProviderTypes(),
     keys: await store.listKeys(),
     templates: await store.listTemplates(),
+    shells: await store.listShells(),
     apis: await store.listApis(),
   }))
   .post(
@@ -202,6 +215,29 @@ const app = new Elysia()
       return { ok: true };
     },
     { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/shells",
+    async ({ params, body }) => store.saveShell({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: shellSchema },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/shells/:shellId",
+    async ({ params, body }) => store.saveShell({ ...body, id: params.shellId, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }), body: shellSchema },
+  )
+  .get(
+    "/ui/providers/:providerTypeId/shells/:shellId",
+    async ({ params }) => store.getShell(params.providerTypeId, params.shellId),
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }) },
+  )
+  .delete(
+    "/ui/providers/:providerTypeId/shells/:shellId",
+    async ({ params }) => {
+      await store.deleteShell(params.providerTypeId, params.shellId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }) },
   )
   .post(
     "/ui/providers/:providerTypeId/apis",
@@ -332,6 +368,32 @@ const app = new Elysia()
       return { ok: true };
     },
     { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
+  )
+  .get("/api/providers/:providerTypeId/shells", async ({ params }) => store.listShells(params.providerTypeId), {
+    params: t.Object({ providerTypeId: idSchema }),
+  })
+  .post(
+    "/api/providers/:providerTypeId/shells",
+    async ({ params, body }) => store.saveShell({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: shellSchema },
+  )
+  .put(
+    "/api/providers/:providerTypeId/shells/:shellId",
+    async ({ params, body }) => store.saveShell({ ...body, id: params.shellId, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }), body: shellSchema },
+  )
+  .get(
+    "/api/providers/:providerTypeId/shells/:shellId",
+    async ({ params }) => store.getShell(params.providerTypeId, params.shellId),
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }) },
+  )
+  .delete(
+    "/api/providers/:providerTypeId/shells/:shellId",
+    async ({ params }) => {
+      await store.deleteShell(params.providerTypeId, params.shellId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }) },
   )
   .get("/api/providers/:providerTypeId/apis", async ({ params }) => store.listApis(params.providerTypeId), {
     params: t.Object({ providerTypeId: idSchema }),
@@ -680,6 +742,7 @@ function isClientInputError(message: string) {
     message.startsWith("Action ") ||
     message.startsWith("Missing variables: ") ||
     message.startsWith("Variable ") ||
+    message.startsWith("Shell ") ||
     message.includes("not supported") ||
     message.includes("referenced by API")
   );

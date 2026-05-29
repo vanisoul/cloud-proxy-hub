@@ -1,6 +1,6 @@
 # terraform-platform
 
-Admin-only Terraform management platform built with Bun and Elysia. It stores provider keys, Terraform templates, and published deployment APIs under `/config`, while runtime Terraform artifacts live under `/data`.
+Admin-only Terraform management platform built with Bun and Elysia. It stores provider keys, Terraform templates, initialization shells, and published deployment APIs under `/config`, while runtime Terraform artifacts live under `/data`.
 
 ## Storage Model
 
@@ -8,7 +8,8 @@ Admin-only Terraform management platform built with Bun and Elysia. It stores pr
 - `/config/keys/<provider-type>/<key-id>/secret.json`: provider key environment values.
 - `/config/templates/<provider-type>/<template-id>/metadata.json`: template metadata.
 - `/config/templates/<provider-type>/<template-id>/files/...`: Terraform template files.
-- `/config/apis/<provider-type>/<api-id>/metadata.json`: published API metadata referencing key and template IDs.
+- `/config/shells/<provider-type>/<shell-id>/metadata.json`: reusable initialization shell metadata and inline commands only.
+- `/config/apis/<provider-type>/<api-id>/metadata.json`: published API metadata referencing key, template, and optional shell binding.
 - `/data/apis/<api-id>`: stable Terraform workdir that preserves `terraform.tfstate` for the published API.
 - `/data/apis/<api-id>/runs/<run-id>`: per-run redacted logs and metadata.
 
@@ -46,11 +47,12 @@ See `.env.example` for supported platform variables:
 1. `GET /api/provider-types`
 2. `POST /api/providers/:providerTypeId/keys`
 3. `POST /api/providers/:providerTypeId/templates`
-4. `POST /api/providers/:providerTypeId/apis`
-5. `POST /api/deployments/:apiId/deploy`
-6. `POST /api/deployments/:apiId/delete`
-7. `GET /api/deployments/:apiId/status`
-8. `GET /api/deployments/:apiId/output`
+4. `POST /api/providers/:providerTypeId/shells` (optional)
+5. `POST /api/providers/:providerTypeId/apis`
+6. `POST /api/deployments/:apiId/deploy`
+7. `POST /api/deployments/:apiId/delete`
+8. `GET /api/deployments/:apiId/status`
+9. `GET /api/deployments/:apiId/output`
 
 Set `Authorization: Bearer <ADMIN_API_KEY>` for all API routes.
 
@@ -59,5 +61,6 @@ Set `Authorization: Bearer <ADMIN_API_KEY>` for all API routes.
 - Provider types are Terraform provider metadata, not app business logic.
 - Key list/get responses expose metadata and `envKeys` only, never key values.
 - Templates are server-side allowlisted and reject `terraform`, `backend`, `required_providers`, `provisioner`, `local-exec`, and `remote-exec` constructs.
-- Published APIs store only provider type, key ID, template ID, and action metadata.
+- Shell resources are platform-managed reusable initialization commands. When a shell is bound while publishing an API, deploy injects the shell commands into a provider-specific startup variable in `terraform.tfvars.json`: Alicloud uses `user_data`; Google uses `startup_script`; other providers may use `user_data`, `startup_script`, or `cloud_init`. Templates remain blocked from defining provisioners.
+- Published APIs store provider type, key ID, template ID, optional shell ID, action metadata, and revision snapshots.
 - Terraform subprocesses receive only minimal runtime env plus the selected key env for that run.

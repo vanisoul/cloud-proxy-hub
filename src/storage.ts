@@ -11,6 +11,8 @@ import type {
   PublicProviderKey,
   PublicTerraformTemplate,
   RuntimeCallExample,
+  ShellBinding,
+  ShellResource,
   TerraformRun,
   TerraformRunEvent,
   TerraformTemplate,
@@ -18,7 +20,8 @@ import type {
 } from "@/types";
 
 type KeyInput = Omit<ProviderKey, "createdAt" | "updatedAt" | "id"> & { id?: string };
-type ApiInput = Omit<ApiPublication, "createdAt" | "updatedAt" | "id" | "revisionId" | "snapshot"> & { id?: string };
+type ShellInput = Omit<ShellResource, "createdAt" | "updatedAt" | "id"> & { id?: string };
+type ApiInput = Omit<ApiPublication, "createdAt" | "updatedAt" | "id" | "revisionId" | "snapshot" | "shellId"> & { id?: string };
 type RunEventInput = Omit<TerraformRunEvent, "id" | "apiId" | "runId" | "createdAt">;
 
 export class PlatformStore {
@@ -27,6 +30,7 @@ export class PlatformStore {
       mkdir(this.configPath("terraform-providers"), { recursive: true }),
       mkdir(this.configPath("keys"), { recursive: true }),
       mkdir(this.configPath("templates"), { recursive: true }),
+      mkdir(this.configPath("shells"), { recursive: true }),
       mkdir(this.configPath("apis"), { recursive: true }),
       mkdir(this.dataPath("apis"), { recursive: true }),
       mkdir(this.dataPath("reconciler"), { recursive: true }),
@@ -135,6 +139,31 @@ export class PlatformStore {
     await rm(this.templatePath(providerTypeId, templateId), { recursive: true, force: true });
   }
 
+  async listShells(providerTypeId?: string): Promise<ShellResource[]> {
+    const providerIds = providerTypeId ? [providerTypeId] : await this.listProviderTypeIds();
+    const nested = await Promise.all(providerIds.map((id) => this.listProviderShells(id)));
+    return nested.flat().sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async getShell(providerTypeId: string, shellId: string): Promise<ShellResource> {
+    return this.readJson<ShellResource>(this.shellPath(providerTypeId, shellId, "metadata.json"));
+  }
+
+  async saveShell(input: ShellInput): Promise<ShellResource> {
+    await this.getProviderType(input.providerTypeId);
+    const now = new Date().toISOString();
+    const id = input.id ?? uuidV7();
+    const existing = await this.maybeReadJson<ShellResource>(this.shellPath(input.providerTypeId, id, "metadata.json"));
+    const shell: ShellResource = { ...input, id, createdAt: existing?.createdAt ?? now, updatedAt: now };
+    await this.writeJson(this.shellPath(shell.providerTypeId, shell.id, "metadata.json"), shell);
+    return shell;
+  }
+
+  async deleteShell(providerTypeId: string, shellId: string) {
+    await this.assertApiDoesNotReference(providerTypeId, { shellId });
+    await rm(this.shellPath(providerTypeId, shellId), { recursive: true, force: true });
+  }
+
   async listApis(providerTypeId?: string): Promise<ApiPublication[]> {
     const providerIds = providerTypeId ? [providerTypeId] : await this.listProviderTypeIds();
     const nested = await Promise.all(providerIds.map((id) => this.listProviderApis(id)));
@@ -159,13 +188,17 @@ export class PlatformStore {
   }
 
   async getProviderApi(providerTypeId: string, apiId: string): Promise<ApiPublication> {
-    return this.readJson<ApiPublication>(this.apiPath(providerTypeId, apiId, "metadata.json"));
+    return normalizeApiPublication(await this.readJson<ApiPublication>(this.apiPath(providerTypeId, apiId, "metadata.json")));
   }
 
   async saveApi(input: ApiInput): Promise<ApiPublication> {
     const providerType = await this.getProviderType(input.providerTypeId);
     const key = await this.getKey(input.providerTypeId, input.keyId);
     const template = await this.getTemplate(input.providerTypeId, input.templateId);
+    const shell = input.shellBinding ? await this.getShell(input.providerTypeId, input.shellBinding.shellId) : undefined;
+    if (shell && input.shellBinding) {
+      validateShellCompatibility(shell, input.shellBinding, template);
+    }
     for (const action of input.allowedActions) {
       if (!providerType.supportedActions.includes(action)) {
         throw new Error(`Action ${action} is not supported by provider ${providerType.id}`);
@@ -183,9 +216,10 @@ export class PlatformStore {
     const existing = await this.maybeReadJson<ApiPublication>(this.apiPath(input.providerTypeId, id, "metadata.json"));
     const api: ApiPublication = {
       ...input,
+      shellId: input.shellBinding?.shellId,
       id,
       revisionId: uuidV7(),
-      snapshot: toApiSnapshot(key, template),
+      snapshot: toApiSnapshot(key, template, shell, input.shellBinding),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
@@ -313,6 +347,10 @@ export class PlatformStore {
     return this.configPath("templates", providerTypeId, templateId, ...parts);
   }
 
+  private shellPath(providerTypeId: string, shellId: string, ...parts: string[]) {
+    return this.configPath("shells", providerTypeId, shellId, ...parts);
+  }
+
   private apiPath(providerTypeId: string, apiId: string, ...parts: string[]) {
     return this.configPath("apis", providerTypeId, apiId, ...parts);
   }
@@ -331,6 +369,13 @@ export class PlatformStore {
     return Promise.all(templateIds.map(async (id) => toPublicTemplate(await this.getTemplate(providerTypeId, id))));
   }
 
+  private async listProviderShells(providerTypeId: string) {
+    const providerDir = this.configPath("shells", providerTypeId);
+    await mkdir(providerDir, { recursive: true });
+    const shellIds = await readdir(providerDir);
+    return Promise.all(shellIds.map((id) => this.getShell(providerTypeId, id)));
+  }
+
   private async listProviderApis(providerTypeId: string) {
     const providerDir = this.configPath("apis", providerTypeId);
     await mkdir(providerDir, { recursive: true });
@@ -338,12 +383,13 @@ export class PlatformStore {
     return Promise.all(apiIds.map((id) => this.getProviderApi(providerTypeId, id)));
   }
 
-  private async assertApiDoesNotReference(providerTypeId: string, reference: { keyId?: string; templateId?: string }) {
+  private async assertApiDoesNotReference(providerTypeId: string, reference: { keyId?: string; templateId?: string; shellId?: string }) {
     const apis = await this.listApis(providerTypeId);
     const found = apis.find(
       (api) =>
         (reference.keyId !== undefined && api.keyId === reference.keyId) ||
-        (reference.templateId !== undefined && api.templateId === reference.templateId),
+        (reference.templateId !== undefined && api.templateId === reference.templateId) ||
+        (reference.shellId !== undefined && apiReferencesShell(api, reference.shellId)),
     );
     if (found) {
       throw new Error(`Resource is referenced by API ${found.id}`);
@@ -413,7 +459,24 @@ function toPublicKey(key: ProviderKey): PublicProviderKey {
 
 function toPublicTemplate(template: TerraformTemplate): PublicTerraformTemplate {
   const { files, ...rest } = template;
-  return { ...rest, fileNames: Object.keys(files).sort() };
+  return { ...rest, fileNames: Object.keys(files).sort(), resourceAddresses: [...templateResourceAddresses(template)].sort() };
+}
+
+function normalizeApiPublication(api: ApiPublication): ApiPublication {
+  if (api.shellBinding || !api.snapshot.shell) {
+    return api;
+  }
+  return {
+    ...api,
+    shellId: api.shellId ?? api.snapshot.shell.id,
+    shellBinding: {
+      shellId: api.snapshot.shell.id,
+    },
+  };
+}
+
+function apiReferencesShell(api: ApiPublication, shellId: string) {
+  return api.shellId === shellId || api.shellBinding?.shellId === shellId || api.snapshot.shell?.id === shellId;
 }
 
 function safeJoin(root: string, parts: string[]) {
@@ -433,7 +496,22 @@ function getId(value: unknown) {
 }
 
 
-function toApiSnapshot(key: ProviderKey, template: TerraformTemplate): ApiPublication["snapshot"] {
+function toApiSnapshot(
+  key: ProviderKey,
+  template: TerraformTemplate,
+  shell?: ShellResource,
+  shellBinding?: ShellBinding,
+): ApiPublication["snapshot"] {
+  const shellSnapshot = shell && shellBinding
+    ? {
+        id: shell.id,
+        providerTypeId: shell.providerTypeId,
+        name: shell.name,
+        inline: shell.inline,
+        startupVariable: resolveShellStartupVariable(template, shell.id),
+        updatedAt: shell.updatedAt,
+      }
+    : undefined;
   return {
     key: {
       id: key.id,
@@ -452,7 +530,78 @@ function toApiSnapshot(key: ProviderKey, template: TerraformTemplate): ApiPublic
       fileNames: Object.keys(template.files).sort(),
       updatedAt: template.updatedAt,
     },
+    shell: shellSnapshot,
   };
+}
+
+function validateShellCompatibility(shell: ShellResource, shellBinding: ShellBinding, template: TerraformTemplate) {
+  if (shell.id !== shellBinding.shellId) {
+    throw new Error(`Shell binding ${shellBinding.shellId} does not match shell ${shell.id}`);
+  }
+  resolveShellStartupVariable(template, shell.id);
+}
+
+function resolveShellStartupVariable(template: TerraformTemplate, shellId: string) {
+  const variableNames = new Set(template.variables.map((variable) => variable.name));
+  const candidates = startupVariableCandidates(template.providerTypeId);
+  const variableName = candidates.find((candidate) => variableNames.has(candidate));
+  if (!variableName) {
+    throw new Error(`Shell ${shellId} requires template variable ${candidates.join(" or ")}`);
+  }
+  return variableName;
+}
+
+function startupVariableCandidates(providerTypeId: string) {
+  if (providerTypeId === "aliyun-alicloud") {
+    return ["user_data"];
+  }
+  if (providerTypeId === "google") {
+    return ["startup_script"];
+  }
+  return ["user_data", "startup_script", "cloud_init"];
+}
+
+function templateResourceAddresses(template: TerraformTemplate) {
+  const addresses = new Set<string>();
+  for (const [fileName, content] of Object.entries(template.files)) {
+    if (fileName.endsWith(".tf.json")) {
+      addJsonTemplateResourceAddresses(content, addresses);
+      continue;
+    }
+    for (const match of stripHclComments(content).matchAll(/resource\s+"([A-Za-z0-9_-]+)"\s+"([A-Za-z0-9_-]+)"/g)) {
+      addresses.add(`${match[1]}.${match[2]}`);
+    }
+  }
+  return addresses;
+}
+
+function addJsonTemplateResourceAddresses(content: string, addresses: Set<string>) {
+  try {
+    const parsed = JSON.parse(content) as { resource?: unknown };
+    if (!parsed.resource || typeof parsed.resource !== "object" || Array.isArray(parsed.resource)) {
+      return;
+    }
+    for (const [resourceType, resources] of Object.entries(parsed.resource)) {
+      if (!resources || typeof resources !== "object" || Array.isArray(resources)) {
+        continue;
+      }
+      for (const resourceName of Object.keys(resources)) {
+        if (/^[A-Za-z0-9_-]+$/.test(resourceType) && /^[A-Za-z0-9_-]+$/.test(resourceName)) {
+          addresses.add(`${resourceType}.${resourceName}`);
+        }
+      }
+    }
+  } catch {
+    return;
+  }
+}
+
+function stripHclComments(content: string) {
+  return content
+    .split("\n")
+    .map((line) => line.replace(/#.*$/, "").replace(/\/\/.*$/, ""))
+    .join("\n")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
 function runtimeActionExample(

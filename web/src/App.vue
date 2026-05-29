@@ -21,14 +21,15 @@ import type {
   ProviderType,
   PublicProviderKey,
   PublicTerraformTemplate,
+  ShellResource,
   TerraformRun,
   TerraformRunEvent,
   TerraformTemplate,
   TemplateVariable,
 } from "./types";
 
-type PageKey = "dashboard" | "keys" | "templates" | "apis" | "runtime";
-type ResourceKind = "key" | "template" | "api";
+type PageKey = "dashboard" | "keys" | "templates" | "shells" | "apis" | "runtime";
+type ResourceKind = "key" | "template" | "shell" | "api";
 type ElementTagType = "primary" | "success" | "warning" | "danger" | "info";
 type DisplayRunEvent = TerraformRunEvent & { groupedEventIds: string[] };
 
@@ -50,7 +51,14 @@ type ApiForm = {
   name: string;
   keyId: string;
   templateId: string;
+  shellId: string;
   allowedActions: DeploymentAction[];
+};
+
+type ShellForm = {
+  name: string;
+  description: string;
+  inlineText: string;
 };
 
 const sampleVariables: TemplateVariable[] = [{ name: "name", required: true, sensitive: false, defaultValue: "demo" }];
@@ -71,14 +79,16 @@ const sampleTemplate = [
 const activePage = ref<PageKey>("dashboard");
 const loading = ref(false);
 const actionLoading = ref(false);
-const state = reactive<BootstrapResponse>({ providerTypes: [], keys: [], templates: [], apis: [] });
+const state = reactive<BootstrapResponse>({ providerTypes: [], keys: [], templates: [], shells: [], apis: [] });
 const selectedProviderId = ref("");
 const keyDialogVisible = ref(false);
 const templateDialogVisible = ref(false);
+const shellDialogVisible = ref(false);
 const apiDialogVisible = ref(false);
 const editingKeySecrets = ref(false);
 const editingKeyId = ref("");
 const editingTemplateId = ref("");
+const editingShellId = ref("");
 const editingApiId = ref("");
 const runtimeApiId = ref("");
 const runList = ref<TerraformRun[] | null>(null);
@@ -99,14 +109,35 @@ const templateForm = reactive<TemplateForm>({
   variablesJson: JSON.stringify(sampleVariables, null, 2),
   mainTf: sampleTemplate,
 });
-const apiForm = reactive<ApiForm>({ name: "", keyId: "", templateId: "", allowedActions: [] });
+const shellForm = reactive<ShellForm>({
+  name: "",
+  description: "",
+  inlineText: "printf 'init shell ok\\n'",
+});
+const apiForm = reactive<ApiForm>({
+  name: "",
+  keyId: "",
+  templateId: "",
+  shellId: "",
+  allowedActions: [],
+});
 
 const selectedProvider = computed(() => state.providerTypes.find((provider) => provider.id === selectedProviderId.value));
 const providerKeys = computed(() => state.keys.filter((key) => key.providerTypeId === selectedProviderId.value));
 const providerTemplates = computed(() =>
   state.templates.filter((template) => template.providerTypeId === selectedProviderId.value),
 );
+const providerShells = computed(() => state.shells.filter((shell) => shell.providerTypeId === selectedProviderId.value));
 const providerApis = computed(() => state.apis.filter((api) => api.providerTypeId === selectedProviderId.value));
+const shellExecutionHintKey = computed<TranslationKey>(() => {
+  if (selectedProviderId.value === "aliyun-alicloud") {
+    return "dialog.shellExecutionAliyun";
+  }
+  if (selectedProviderId.value === "google") {
+    return "dialog.shellExecutionGoogle";
+  }
+  return "dialog.shellExecutionGeneric";
+});
 const selectedRuntimeApi = computed(() => state.apis.find((api) => api.id === runtimeApiId.value));
 const selectedRuntimeTemplate = computed(() => selectedRuntimeApi.value?.snapshot.template);
 const deployDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("deploy"));
@@ -154,6 +185,7 @@ const metrics = computed(() => [
   { label: t("metric.providerTypes"), value: state.providerTypes.length },
   { label: t("metric.keys"), value: providerKeys.value.length },
   { label: t("metric.templates"), value: providerTemplates.value.length },
+  { label: t("metric.shells"), value: providerShells.value.length },
   { label: t("metric.publishedApis"), value: providerApis.value.length },
 ]);
 
@@ -162,6 +194,7 @@ const pageTitle = computed(() => {
     dashboard: "page.dashboard",
     keys: "page.keys",
     templates: "page.templates",
+    shells: "page.shells",
     apis: "page.apis",
     runtime: "page.runtime",
   };
@@ -183,6 +216,7 @@ async function loadBootstrap() {
     state.providerTypes = data.providerTypes;
     state.keys = data.keys;
     state.templates = data.templates;
+    state.shells = data.shells;
     state.apis = data.apis;
     if (!selectedProviderId.value && data.providerTypes[0]) {
       selectedProviderId.value = data.providerTypes[0].id;
@@ -209,7 +243,7 @@ function selectPage(index: string) {
 }
 
 function isPageKey(value: string): value is PageKey {
-  return value === "dashboard" || value === "keys" || value === "templates" || value === "apis" || value === "runtime";
+  return value === "dashboard" || value === "keys" || value === "templates" || value === "shells" || value === "apis" || value === "runtime";
 }
 
 function formatDate(value: string) {
@@ -349,12 +383,47 @@ async function saveTemplate() {
   });
 }
 
+function openShellDialog(shell?: ShellResource) {
+  editingShellId.value = shell?.id ?? "";
+  shellForm.name = shell?.name ?? "";
+  shellForm.description = shell?.description ?? "";
+  shellForm.inlineText = shell?.inline.join("\n") ?? "printf 'init shell ok\\n'";
+  shellDialogVisible.value = true;
+}
+
+async function saveShell() {
+  await runAction(async () => {
+    const provider = requireProvider();
+    const inline = shellForm.inlineText
+      .split("\n")
+      .filter((line) => line.trim().length > 0);
+    if (inline.length === 0) {
+      throw new Error(t("error.shellInlineRequired"));
+    }
+    const path = `/ui/providers/${encodeURIComponent(provider.id)}/shells${
+      editingShellId.value ? `/${encodeURIComponent(editingShellId.value)}` : ""
+    }`;
+    await requestJson<ShellResource>(path, {
+      method: "POST",
+      body: JSON.stringify({
+        name: shellForm.name,
+        description: optionalText(shellForm.description),
+        inline,
+      }),
+    });
+    shellDialogVisible.value = false;
+    await loadBootstrap();
+    ElMessage.success(t("message.shellSaved"));
+  });
+}
+
 function openApiDialog(api?: ApiPublication) {
   const provider = selectedProvider.value;
   editingApiId.value = api?.id ?? "";
   apiForm.name = api?.name ?? "";
   apiForm.keyId = api?.keyId ?? providerKeys.value[0]?.id ?? "";
   apiForm.templateId = api?.templateId ?? providerTemplates.value[0]?.id ?? "";
+  apiForm.shellId = api?.shellId ?? "";
   apiForm.allowedActions = [...(api?.allowedActions ?? provider?.supportedActions ?? [])];
   apiDialogVisible.value = true;
 }
@@ -368,12 +437,18 @@ async function saveApi() {
     const path = `/ui/providers/${encodeURIComponent(provider.id)}/apis${
       editingApiId.value ? `/${encodeURIComponent(editingApiId.value)}` : ""
     }`;
+    const shellBinding = apiForm.shellId
+      ? {
+          shellId: apiForm.shellId,
+        }
+      : undefined;
     await requestJson<ApiPublication>(path, {
       method: "POST",
       body: JSON.stringify({
         name: apiForm.name,
         keyId: apiForm.keyId,
         templateId: apiForm.templateId,
+        shellBinding,
         allowedActions: apiForm.allowedActions,
       }),
     });
@@ -383,7 +458,7 @@ async function saveApi() {
   });
 }
 
-async function deleteResource(kind: ResourceKind, item: PublicProviderKey | PublicTerraformTemplate | ApiPublication) {
+async function deleteResource(kind: ResourceKind, item: PublicProviderKey | PublicTerraformTemplate | ShellResource | ApiPublication) {
   await runAction(async () => {
     const confirmed = await confirmDelete(item.name);
     if (!confirmed) {
@@ -397,6 +472,11 @@ async function deleteResource(kind: ResourceKind, item: PublicProviderKey | Publ
     } else if (kind === "template") {
       await requestJson<{ ok: true }>(
         `/ui/providers/${encodeURIComponent(item.providerTypeId)}/templates/${encodeURIComponent(item.id)}`,
+        { method: "DELETE" },
+      );
+    } else if (kind === "shell") {
+      await requestJson<{ ok: true }>(
+        `/ui/providers/${encodeURIComponent(item.providerTypeId)}/shells/${encodeURIComponent(item.id)}`,
         { method: "DELETE" },
       );
     } else {
@@ -700,6 +780,7 @@ function t(key: TranslationKey, params?: TranslationParams) {
         <el-menu-item index="dashboard">{{ t("nav.dashboard") }}</el-menu-item>
         <el-menu-item index="keys">{{ t("nav.keys") }}</el-menu-item>
         <el-menu-item index="templates">{{ t("nav.templates") }}</el-menu-item>
+        <el-menu-item index="shells">{{ t("nav.shells") }}</el-menu-item>
         <el-menu-item index="apis">{{ t("nav.apis") }}</el-menu-item>
         <el-menu-item index="runtime">{{ t("nav.runtime") }}</el-menu-item>
       </el-menu>
@@ -759,9 +840,10 @@ function t(key: TranslationKey, params?: TranslationParams) {
             <el-button type="primary" @click="activePage = 'runtime'">{{ t("action.openRuntime") }}</el-button>
           </div>
           <el-row :gutter="18">
-            <el-col :xs="24" :md="8"><el-alert :title="t('dashboard.keysTitle')" :description="t('dashboard.keysDescription', { count: providerKeys.length })" type="success" :closable="false" /></el-col>
-            <el-col :xs="24" :md="8"><el-alert :title="t('dashboard.templatesTitle')" :description="t('dashboard.templatesDescription', { count: providerTemplates.length })" type="warning" :closable="false" /></el-col>
-            <el-col :xs="24" :md="8"><el-alert :title="t('dashboard.apisTitle')" :description="t('dashboard.apisDescription', { count: providerApis.length })" type="info" :closable="false" /></el-col>
+            <el-col :xs="24" :md="6"><el-alert :title="t('dashboard.keysTitle')" :description="t('dashboard.keysDescription', { count: providerKeys.length })" type="success" :closable="false" /></el-col>
+            <el-col :xs="24" :md="6"><el-alert :title="t('dashboard.templatesTitle')" :description="t('dashboard.templatesDescription', { count: providerTemplates.length })" type="warning" :closable="false" /></el-col>
+            <el-col :xs="24" :md="6"><el-alert :title="t('dashboard.shellsTitle')" :description="t('dashboard.shellsDescription', { count: providerShells.length })" type="info" :closable="false" /></el-col>
+            <el-col :xs="24" :md="6"><el-alert :title="t('dashboard.apisTitle')" :description="t('dashboard.apisDescription', { count: providerApis.length })" type="info" :closable="false" /></el-col>
           </el-row>
         </el-card>
 
@@ -791,6 +873,19 @@ function t(key: TranslationKey, params?: TranslationParams) {
           </el-table>
         </el-card>
 
+        <el-card v-if="activePage === 'shells'" class="workbench-card">
+          <div class="workbench-header">
+            <div><h2 class="workbench-title">{{ t("shells.title") }}</h2><p class="workbench-copy">{{ t("shells.copy") }}</p></div>
+            <el-button type="primary" @click="openShellDialog()">{{ t("action.createShell") }}</el-button>
+          </div>
+          <el-table :data="providerShells" :empty-text="t('empty.shells')" stripe>
+            <el-table-column :label="t('table.name')" min-width="220"><template #default="{ row }"><div class="resource-name"><strong>{{ row.name }}</strong><small>{{ row.id }}</small></div></template></el-table-column>
+            <el-table-column :label="t('table.commands')" min-width="220"><template #default="{ row }">{{ row.inline.length }}</template></el-table-column>
+            <el-table-column prop="updatedAt" :label="t('table.updated')" width="190"><template #default="{ row }">{{ formatDate(row.updatedAt) }}</template></el-table-column>
+            <el-table-column :label="t('table.actions')" width="180" fixed="right"><template #default="{ row }"><el-button size="small" @click="openShellDialog(row)">{{ t("action.edit") }}</el-button><el-button size="small" type="danger" @click="deleteResource('shell', row)">{{ t("action.delete") }}</el-button></template></el-table-column>
+          </el-table>
+        </el-card>
+
         <el-card v-if="activePage === 'apis'" class="workbench-card">
           <div class="workbench-header">
             <div><h2 class="workbench-title">{{ t("apis.title") }}</h2><p class="workbench-copy">{{ t("apis.copy") }}</p></div>
@@ -798,7 +893,7 @@ function t(key: TranslationKey, params?: TranslationParams) {
           </div>
           <el-table :data="providerApis" :empty-text="t('empty.apis')" stripe>
             <el-table-column :label="t('table.name')" min-width="220"><template #default="{ row }"><div class="resource-name"><strong>{{ row.name }}</strong><small>{{ row.id }}</small></div></template></el-table-column>
-            <el-table-column :label="t('table.binding')" min-width="260"><template #default="{ row }">{{ row.keyId }} + {{ row.templateId }}</template></el-table-column>
+            <el-table-column :label="t('table.binding')" min-width="300"><template #default="{ row }">{{ row.keyId }} + {{ row.templateId }} + {{ row.shellId ?? t("shell.none") }}</template></el-table-column>
             <el-table-column :label="t('table.actions')" min-width="180"><template #default="{ row }"><el-tag v-for="action in row.allowedActions" :key="action" type="success">{{ action }}</el-tag></template></el-table-column>
             <el-table-column prop="revisionId" :label="t('table.revision')" min-width="180" />
             <el-table-column :label="t('table.manage')" width="180" fixed="right"><template #default="{ row }"><el-button size="small" @click="openApiDialog(row)">{{ t("action.edit") }}</el-button><el-button size="small" type="danger" @click="deleteResource('api', row)">{{ t("action.delete") }}</el-button></template></el-table-column>
@@ -868,11 +963,25 @@ function t(key: TranslationKey, params?: TranslationParams) {
     <template #footer><div class="dialog-footer"><el-button @click="templateDialogVisible = false">{{ t("action.cancel") }}</el-button><el-button type="primary" :loading="actionLoading" @click="saveTemplate">{{ t("action.saveTemplate") }}</el-button></div></template>
   </el-dialog>
 
+  <el-dialog v-model="shellDialogVisible" :title="editingShellId ? t('dialog.editShell') : t('dialog.createShell')" width="680px">
+    <el-form label-position="top">
+      <el-form-item :label="t('form.name')" required><el-input v-model="shellForm.name" /></el-form-item>
+      <el-form-item :label="t('form.description')"><el-input v-model="shellForm.description" /></el-form-item>
+      <el-form-item :label="t('form.inlineCommands')" required><el-input v-model="shellForm.inlineText" type="textarea" :rows="8" spellcheck="false" /></el-form-item>
+    </el-form>
+    <template #footer><div class="dialog-footer"><el-button @click="shellDialogVisible = false">{{ t("action.cancel") }}</el-button><el-button type="primary" :loading="actionLoading" @click="saveShell">{{ t("action.saveShell") }}</el-button></div></template>
+  </el-dialog>
+
   <el-dialog v-model="apiDialogVisible" :title="editingApiId ? t('dialog.editApi') : t('dialog.publishApi')" width="600px">
     <el-form label-position="top">
       <el-form-item :label="t('form.name')" required><el-input v-model="apiForm.name" /></el-form-item>
       <el-form-item :label="t('form.key')" required><el-select v-model="apiForm.keyId"><el-option v-for="key in providerKeys" :key="key.id" :label="`${key.name} (${key.id})`" :value="key.id" /></el-select></el-form-item>
       <el-form-item :label="t('form.template')" required><el-select v-model="apiForm.templateId"><el-option v-for="template in providerTemplates" :key="template.id" :label="`${template.name} (${template.id})`" :value="template.id" /></el-select></el-form-item>
+      <el-form-item :label="t('form.shell')"><el-select v-model="apiForm.shellId" clearable><el-option v-for="shell in providerShells" :key="shell.id" :label="`${shell.name} (${shell.id})`" :value="shell.id" /></el-select></el-form-item>
+      <div v-if="apiForm.shellId">
+        <el-alert class="form-tip" :title="t('dialog.shellBindingTip')" type="info" show-icon :closable="false" />
+        <el-alert class="form-tip" :title="t(shellExecutionHintKey)" type="warning" show-icon :closable="false" />
+      </div>
       <el-form-item :label="t('form.allowedActions')" required><el-checkbox-group v-model="apiForm.allowedActions"><el-checkbox-button v-for="action in selectedProvider?.supportedActions ?? []" :key="action" :label="action" /></el-checkbox-group></el-form-item>
     </el-form>
     <template #footer><div class="dialog-footer"><el-button @click="apiDialogVisible = false">{{ t("action.cancel") }}</el-button><el-button type="primary" :loading="actionLoading" @click="saveApi">{{ t("action.publishApi") }}</el-button></div></template>

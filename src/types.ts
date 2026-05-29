@@ -51,6 +51,21 @@ export type TerraformTemplateInput = Omit<TerraformTemplate, "createdAt" | "upda
 
 export type PublicTerraformTemplate = Omit<TerraformTemplate, "files"> & {
   fileNames: string[];
+  resourceAddresses: string[];
+};
+
+export type ShellBinding = {
+  shellId: string;
+};
+
+export type ShellResource = {
+  id: string;
+  providerTypeId: string;
+  name: string;
+  description?: string;
+  inline: string[];
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type ApiPublication = {
@@ -59,6 +74,8 @@ export type ApiPublication = {
   name: string;
   keyId: string;
   templateId: string;
+  shellId?: string;
+  shellBinding?: ShellBinding;
   allowedActions: DeploymentAction[];
   revisionId: string;
   snapshot: ApiPublicationSnapshot;
@@ -84,6 +101,14 @@ export type ApiPublicationSnapshot = {
     fileNames: string[];
     updatedAt: string;
   };
+  shell?: {
+    id: string;
+    providerTypeId: string;
+    name: string;
+    inline: string[];
+    startupVariable: string;
+    updatedAt: string;
+  };
 };
 
 export type DeploymentAction = "deploy" | "delete";
@@ -97,6 +122,7 @@ export type TerraformRun = {
   providerTypeId: string;
   keyId: string;
   templateId: string;
+  shellId?: string;
   action: DeploymentAction;
   status: RunStatus;
   vars: Record<string, string>;

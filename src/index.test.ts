@@ -34,10 +34,12 @@ describe("Admin SPA contract", () => {
     expect(app).toContain('dashboard: "page.dashboard"');
     expect(app).toContain('keys: "page.keys"');
     expect(app).toContain('templates: "page.templates"');
+    expect(app).toContain('shells: "page.shells"');
     expect(app).toContain('apis: "page.apis"');
     expect(app).toContain('runtime: "page.runtime"');
     expect(app).toContain("t('runtime.unlock')");
     expect(app).toContain("t('form.mainTf')");
+    expect(app).toContain("t('form.inlineCommands')");
     expect(app).toContain("mainTf");
     expect(i18n).toContain("Operations Dashboard");
     expect(i18n).toContain("憑證設定檔");
@@ -88,6 +90,7 @@ describe("Admin SPA contract", () => {
 
     expect(app).toContain("editingKeyId");
     expect(app).toContain("editingTemplateId");
+    expect(app).toContain("editingShellId");
     expect(app).toContain("editingApiId");
     expect(app).not.toContain("optionalText(keyForm.id)");
     expect(app).not.toContain("optionalText(templateForm.id)");
@@ -96,6 +99,7 @@ describe("Admin SPA contract", () => {
     expect(i18n).not.toContain("Resource ID");
     expect(i18n).not.toContain("資源 ID");
     expect(await Bun.file("web/src/types.ts").text()).toContain('files: Record<string, string>');
+    expect(await Bun.file("web/src/types.ts").text()).toContain("export type ShellResource");
     expect(app).toContain('fullTemplate.files');
     expect(app).toContain('templateFiles.value = fullTemplate.files');
     expect(app).toContain('const files = { ...templateFiles.value, "main.tf": templateForm.mainTf };');
@@ -113,6 +117,32 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(webSource).toContain("/ui/deployments/");
     expect(webSource).not.toContain("ADMIN_API_KEY");
     expect(webSource).not.toContain("authorization");
+  });
+
+  it("exposes shell CRUD and optional API shell binding in the SPA contract", async () => {
+    const app = await Bun.file("web/src/App.vue").text();
+    const i18n = await Bun.file("web/src/i18n.ts").text();
+    const server = await Bun.file("src/index.ts").text();
+
+    expect(app).toContain('type PageKey = "dashboard" | "keys" | "templates" | "shells" | "apis" | "runtime"');
+    expect(app).toContain("const providerShells = computed");
+    expect(app).toContain("const shellExecutionHintKey = computed");
+    expect(app).toContain("function openShellDialog(shell?: ShellResource)");
+    expect(app).toContain("async function saveShell()");
+    expect(app).toContain("/shells");
+    expect(app).toContain("const shellBinding = apiForm.shellId");
+    expect(app).toContain('v-model="apiForm.shellId"');
+    expect(app).toContain("shellExecutionHintKey");
+    expect(i18n).toContain("Shell Library");
+    expect(i18n).toContain("Shell 資料庫");
+    expect(i18n).toContain("dialog.shellExecutionAliyun");
+    expect(i18n).toContain("alicloud_instance.user_data");
+    expect(i18n).toContain("google_compute_instance.metadata_startup_script");
+    expect(server).toContain('shells: await store.listShells()');
+    expect(server).toContain('"/ui/providers/:providerTypeId/shells"');
+    expect(server).toContain('"/api/providers/:providerTypeId/shells"');
+    expect(server).toContain("const shellBindingSchema");
+    expect(server).toContain("shellId: idSchema");
   });
 
   it("defines focused runtime history, live events, and redacted event routes", async () => {

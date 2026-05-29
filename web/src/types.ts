@@ -35,6 +35,7 @@ export type PublicTerraformTemplate = {
   description?: string;
   variables: TemplateVariable[];
   fileNames: string[];
+  resourceAddresses: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -43,12 +44,28 @@ export type TerraformTemplate = Omit<PublicTerraformTemplate, "fileNames"> & {
   files: Record<string, string>;
 };
 
+export type ShellBinding = {
+  shellId: string;
+};
+
+export type ShellResource = {
+  id: string;
+  providerTypeId: string;
+  name: string;
+  description?: string;
+  inline: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ApiPublication = {
   id: string;
   providerTypeId: string;
   name: string;
   keyId: string;
   templateId: string;
+  shellId?: string;
+  shellBinding?: ShellBinding;
   allowedActions: DeploymentAction[];
   revisionId: string;
   snapshot: {
@@ -69,6 +86,14 @@ export type ApiPublication = {
       fileNames: string[];
       updatedAt: string;
     };
+    shell?: {
+      id: string;
+      providerTypeId: string;
+      name: string;
+      inline: string[];
+      startupVariable: string;
+      updatedAt: string;
+    };
   };
   createdAt: string;
   updatedAt: string;
@@ -81,6 +106,7 @@ export type TerraformRun = {
   providerTypeId: string;
   keyId: string;
   templateId: string;
+  shellId?: string;
   action: DeploymentAction;
   status: "queued" | "running" | "succeeded" | "failed" | "needs_attention";
   vars: Record<string, string>;
@@ -138,5 +164,6 @@ export type BootstrapResponse = {
   providerTypes: ProviderType[];
   keys: PublicProviderKey[];
   templates: PublicTerraformTemplate[];
+  shells: ShellResource[];
   apis: ApiPublication[];
 };

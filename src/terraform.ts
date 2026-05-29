@@ -115,20 +115,22 @@ export class TerraformService {
 
     try {
       const template = api.snapshot.template;
+      const varsWithShell = injectShellStartupVars(api, input.vars);
       const missing = template.variables.filter(
-        (variable) => variable.required && input.vars[variable.name] === undefined,
+        (variable) => variable.required && varsWithShell[variable.name] === undefined,
       );
       if (missing.length > 0) {
         throw new Error(`Missing variables: ${missing.map((variable) => variable.name).join(", ")}`);
       }
 
-      const sensitiveVarNames = template.variables
+      const sensitiveVarNames = new Set(template.variables
         .filter((variable) => variable.sensitive)
-        .map((variable) => variable.name);
+        .map((variable) => variable.name));
       const executionVars = sanitizeVars(
         template.variables.map((variable) => variable.name),
-        input.vars,
+        varsWithShell,
       );
+      const sortedSensitiveVarNames = [...sensitiveVarNames].sort();
       const runId = uuidV7();
       const run: TerraformRun = {
         id: runId,
@@ -137,10 +139,11 @@ export class TerraformService {
         providerTypeId: api.providerTypeId,
         keyId: api.keyId,
         templateId: api.templateId,
+        shellId: api.shellId,
         action,
         status: "queued",
-        vars: redactVars(input.vars, sensitiveVarNames),
-        sensitiveVarNames: sensitiveVarNames.sort(),
+        vars: redactVars(executionVars, sortedSensitiveVarNames),
+        sensitiveVarNames: sortedSensitiveVarNames,
         stateId: uuidV7(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -217,7 +220,6 @@ export class TerraformService {
         mode: 0o600,
       },
     );
-
     const env = terraformEnv(key.env);
     const commandResults: TerraformCommandResult[] = [];
     const init = await this.runCommand(run, "init", ["init", "-input=false"], workDir, env, secrets);
@@ -509,6 +511,17 @@ function terraformArgs(action: DeploymentAction) {
   return action === "deploy"
     ? ["apply", "-input=false", "-no-color", "-auto-approve"]
     : ["destroy", "-input=false", "-no-color", "-auto-approve"];
+}
+
+function injectShellStartupVars(api: ApiPublication, vars: Record<string, string>) {
+  const shell = api.snapshot.shell;
+  if (!shell) {
+    return vars;
+  }
+  return {
+    ...vars,
+    [shell.startupVariable]: `${shell.inline.join("\n")}\n`,
+  };
 }
 
 function redactSecrets(output: string, secrets: string[]) {
