@@ -31,15 +31,6 @@ type PageKey = "dashboard" | "keys" | "templates" | "apis" | "runtime";
 type ResourceKind = "key" | "template" | "api";
 type ElementTagType = "primary" | "success" | "warning" | "danger" | "info";
 
-type RuntimeHistoryTreeNode = {
-  id: string;
-  label: string;
-  meta?: string;
-  runId?: string;
-  status?: TerraformRun["status"];
-  children?: RuntimeHistoryTreeNode[];
-};
-
 type KeyForm = {
   name: string;
   description: string;
@@ -126,26 +117,7 @@ const runtimeRunDialogTitle = computed(() => {
   }
   return t("runtime.runDialogTitle", { action: runDetail.value.action, runId: runDetail.value.id });
 });
-const runHistoryTree = computed<RuntimeHistoryTreeNode[]>(() => {
-  const api = selectedRuntimeApi.value;
-  if (!api) {
-    return [];
-  }
-  return [
-    {
-      id: `api:${api.id}`,
-      label: api.name,
-      meta: api.id,
-      children: (runList.value ?? []).map((run) => ({
-        id: `run:${run.id}`,
-        label: `${run.action} · ${formatDate(run.createdAt)}`,
-        meta: `${run.status} · ${run.apiRevisionId}`,
-        runId: run.id,
-        status: run.status,
-      })),
-    },
-  ];
-});
+const runtimeHistoryItems = computed(() => runList.value ?? []);
 const elementLocale = computed(() => elementPlusLocales[currentLocale.value]);
 const selectedLocale = computed({
   get: () => currentLocale.value,
@@ -472,17 +444,6 @@ async function viewRun(runId: string) {
     }
     ElMessage.success(t("message.runDetailLoaded"));
   });
-}
-
-function selectRun(row: TerraformRun) {
-  void viewRun(row.id);
-}
-
-function selectRunHistoryNode(node: RuntimeHistoryTreeNode) {
-  if (!node.runId) {
-    return;
-  }
-  void viewRun(node.runId);
 }
 
 async function loadRunDetail(api: ApiPublication, runId: string, seq = runtimeRequestSeq) {
@@ -835,15 +796,15 @@ function t(key: TranslationKey, params?: TranslationParams) {
               <el-card shadow="never">
                 <template #header>{{ t("panel.runHistory") }}</template>
                 <el-empty v-if="!runList || runList.length === 0" :description="t('empty.runList')" :image-size="52" />
-                <el-tree v-else :data="runHistoryTree" node-key="id" default-expand-all @node-click="selectRunHistoryNode">
-                  <template #default="{ data }">
-                    <div class="resource-name history-tree-node">
-                      <strong>{{ data.label }}</strong>
-                      <small>{{ data.meta }}</small>
-                      <el-tag v-if="data.status" :type="runStatusType(data.status)" size="small">{{ data.status }}</el-tag>
-                    </div>
-                  </template>
-                </el-tree>
+                <el-timeline v-else class="history-timeline">
+                  <el-timeline-item v-for="run in runtimeHistoryItems" :key="run.id" :timestamp="formatDate(run.createdAt)" :type="runStatusType(run.status)">
+                    <el-button class="history-run-button" text @click="viewRun(run.id)">
+                      <span>{{ run.action }}</span>
+                      <el-tag :type="runStatusType(run.status)" size="small">{{ run.status }}</el-tag>
+                      <small>{{ run.apiRevisionId }} · {{ run.id }}</small>
+                    </el-button>
+                  </el-timeline-item>
+                </el-timeline>
               </el-card>
             </div>
           </div>
