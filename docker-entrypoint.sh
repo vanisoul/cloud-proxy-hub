@@ -1,9 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 部署資料庫 - 在生產環境中使用 prisma migrate deploy
-bun prisma migrate deploy
+mkdir -p "${CONFIG_DIR:-/app/config}" "${DATA_DIR:-/app/data}"
 
-# 初始化資料庫
-bun prisma db seed
-
-$@
+exec "$@"

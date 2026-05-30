@@ -1,345 +1,814 @@
-import { CronTime } from "cron";
 import { Elysia, t } from "elysia";
-import * as ipTools from "ip";
 
-import { createLogger } from "@/utils/logger";
-import { swagger } from "@elysiajs/swagger";
+import { appConfig } from "@/config";
+import { initShellCallbackMaxBytes, verifyInitShellCallbackToken } from "@/init-shell-callback";
+import { createLogger, redact } from "@/logger";
+import { PlatformStore } from "@/storage";
+import { TerraformService } from "@/terraform";
 
-import { clearInstance } from "@/service/clear-instance";
-import { createInstance } from "@/service/create-instance";
-import { getInstanceIp } from "@/service/get-instance-ip";
-import { installDocker } from "@/service/install-docker";
-import { installSocks } from "@/service/install-sock5";
-import { installVpn } from "@/service/install-vpn";
-import { isReady } from "@/service/instance-ready";
-import { generatePACFile } from "@/service/pac-file";
-import { startInstance } from "@/service/start-instance";
+const logger = createLogger("terraform-platform");
+const store = new PlatformStore();
+const terraform = new TerraformService(store);
 
-import { aliyunECS } from "@/aliyun/index";
-import { clearInstanceJob, forceClearJob } from "@/cron-tab/index";
-import { sqliteDB } from "@/sqlite/index";
+if (!appConfig.apiKey) {
+  throw new Error("ADMIN_API_KEY is required for this admin-only service");
+}
 
-import {
-  checkHeaders,
-  enableForceClear,
-  forceClearTimeZone,
-  forceCronTime,
-  getProxyTarget,
-  getVersion,
-  getXApiKey,
-  logAllEnvironmentVariables,
-} from "@/env/env-manager";
+await store.initialize();
 
-// 創建日誌記錄器
-const logger = createLogger("index");
+const sessionCookieSecret = await deriveSessionCookieSecret();
+const idSchema = t.String({ minLength: 1, pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]*$" });
+const stringRecord = t.Record(t.String(), t.String());
+const sessionCookieName = "terraform_platform_session";
+const sessionCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
 
-// API 認證模式
-const queryStringSchema = t.Object({
-  xApiKey: t.String(),
+const keySchema = t.Object({
+  id: t.Optional(idSchema),
+  name: t.String({ minLength: 1 }),
+  description: t.Optional(t.String()),
+  env: stringRecord,
 });
 
-// 建立中變數, 用於避免重複執行
-let creating = false;
+const templateSchema = t.Object({
+  id: t.Optional(idSchema),
+  name: t.String({ minLength: 1 }),
+  version: t.String({ minLength: 1 }),
+  description: t.Optional(t.String()),
+  variables: t.Array(
+    t.Object({
+      name: idSchema,
+      required: t.Boolean(),
+      sensitive: t.Boolean(),
+      defaultValue: t.Optional(t.String()),
+    }),
+  ),
+  mainTf: t.Optional(t.String({ minLength: 1 })),
+  files: t.Optional(stringRecord),
+});
 
-/**
- * 將 IPv6 地址轉換為 IPv4 地址
- */
-function addressToIpv4(address: string) {
-  // 正則表達式匹配 IPv4 映射的 IPv6 地址
-  const regex = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/;
-  const match = address.match(regex);
+const shellSchema = t.Object({
+  id: t.Optional(idSchema),
+  name: t.String({ minLength: 1 }),
+  description: t.Optional(t.String()),
+  inline: t.Array(t.String({ minLength: 1 }), { minItems: 1 }),
+});
 
-  // 如果匹配成功，則返回匹配的 IPv4 地址
-  if (match) {
-    return match[1];
-  }
+const shellBindingSchema = t.Object({
+  shellId: idSchema,
+});
 
-  // 如果輸入的不是有效的 IPv4 映射的 IPv6 地址，返回原地址
-  return address;
-}
+const apiSchema = t.Object({
+  id: t.Optional(idSchema),
+  name: t.String({ minLength: 1 }),
+  keyId: idSchema,
+  templateId: idSchema,
+  shellBinding: t.Optional(shellBindingSchema),
+  allowedActions: t.Array(t.Union([t.Literal("deploy"), t.Literal("delete")])),
+});
 
-/**
- * 從請求頭中獲取 IP 地址
- */
-function getIpFromHeaders(headers: Headers, checkHeaderNames: string[]): string | undefined {
-  // 檢查指定的請求頭
-  for (const headerName of checkHeaderNames) {
-    const headerValue = headers.get(headerName.toLowerCase());
-    if (headerValue) {
-      // 如果請求頭包含多個 IP 地址（通常以逗號分隔），取第一個
-      const ips = headerValue.split(',').map(ip => ip.trim());
-      if (ips.length > 0 && ips[0]) {
-        logger.debug("找到 IP 地址", { headerName, ip: ips[0] });
-        return ips[0];
-      }
-    }
-  }
+const runSchema = t.Object({
+  vars: stringRecord,
+});
 
-  logger.warn("未找到 IP 地址");
-  return undefined;
-}
-
-/**
- * 創建實例的完整流程
- */
-async function create() {
-  logger.info("開始創建實例");
-
-  // 建立實例
-  const id = await createInstance();
-  if (id === undefined) {
-    logger.error("創建實例失敗");
-    return;
-  }
-
-  // 等待狀態為 Stopped
-  logger.info("等待實例狀態為 Stopped", { id });
-  let stoped = false;
-  while (!stoped) {
-    stoped = await aliyunECS.describeStoppedInstance(id);
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-  }
-
-  // 獲取 IP
-  logger.info("獲取實例 IP", { id });
-  const ip = await getInstanceIp(id);
-  if (ip === undefined) {
-    logger.error("獲取實例 IP 失敗", { id });
-    return;
-  }
-
-  // 啟動實例, 並等待狀態為 Running
-  logger.info("啟動實例", { id, ip });
-  const start = await startInstance(id);
-
-  // 安裝 docker
-  logger.info("安裝 Docker", { id, start });
-  const docker = await installDocker(id);
-
-  // 安裝 sock5
-  logger.info("安裝 Socks5", { id, docker });
-  const socks = await installSocks(id, ip);
-
-  // 安裝 vpn
-  logger.info("安裝 VPN", { id, socks });
-  await installVpn(id);
-
-  logger.info("實例創建完成", { id });
-}
-
-// 創建 API 認證中間件
-const authMiddleware = new Elysia()
-  .onBeforeHandle({ as: "global" }, ({ query, path }) => {
-    // 排除檢查列表
-    const excludeList = ["/swagger/json"];
-    if (excludeList.includes(path)) {
+const app = new Elysia()
+  .onBeforeHandle(async ({ headers, path, request }) => {
+    if (path.startsWith("/assets") || path === "/login") {
       return;
     }
 
-    const apiKey = getXApiKey();
-    if (apiKey && apiKey !== query.xApiKey) {
-      return { status: 401, body: "Unauthorized" };
+    if (path.startsWith("/callbacks/init-shell/")) {
+      return;
     }
-  });
 
-// 實例管理路由組
-const instanceManagementRoutes = new Elysia()
-  // 建立實例
-  .get("/create", async () => {
-    // 如果有正在建立中的實例, 則不執行
-    if (creating) {
-      logger.warn("已有實例正在創建中");
-      return "creating";
+    if (isCrossOriginUiMutation(path, request)) {
+      logger.warn("拒絕跨來源 UI 請求", { path, method: request.method });
+      return new Response("Forbidden", { status: 403 });
     }
-    creating = true;
 
-    // 等待 15 秒, 解放避免連點手誤
-    setTimeout(() => {
-      creating = false;
-    }, 15000);
+    const bearerAuthorized = headers.authorization?.replace(/^Bearer\s+/i, "") === appConfig.apiKey;
+    if (path.startsWith("/api/")) {
+      if (!bearerAuthorized) {
+        logger.warn("拒絕未授權請求", { path, method: request.method });
+        return new Response("Unauthorized", { status: 401 });
+      }
 
-    // 建立實例
-    void create();
-    void clearInstance();
+      return;
+    }
 
-    // 回傳已收到建立指令, 並在背景執行, 如果需要知道狀態, 請使用 /ids & /status/:id
-    return "start create, please check /ids & /status/:id";
-  }, {
-    query: queryStringSchema,
+    const cookieAuthorized = await hasValidSessionCookie(request);
+    if (bearerAuthorized || cookieAuthorized) {
+      return;
+    }
+
+    if (path === "/" && request.method === "GET") {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: "/login",
+        },
+      });
+    }
+
+    logger.warn("拒絕未授權請求", { path, method: request.method });
+    return new Response("Unauthorized", { status: 401 });
   })
-  // 根據 id 刪除實例
-  .get("/delete/:id", async ({ params: { id } }) => {
-    sqliteDB.deleteInstance(id);
-    const result = await clearInstance();
-    return result;
-  }, {
-    query: queryStringSchema,
-  })
-  // 刪除所有實例
-  .get("/delete/", async () => {
-    const instances = await sqliteDB.getInstances();
-    const ids = instances.map((instance) => instance.id);
-    await sqliteDB.deleteInstances(ids);
-    const result = await clearInstance();
-    return result;
-  }, {
-    query: queryStringSchema,
-  })
-  // 清理不在管理中的實例
-  .get("/clear", async () => {
-    const result = await clearInstance();
-    if (result === undefined) {
-      return "no instance need delete";
-    }
-    return `instance deleted: ${result.join(", ")}`;
-
-  }, {
-    query: queryStringSchema,
-  });
-
-// 實例查詢路由組
-const instanceQueryRoutes = new Elysia()
-  // 取得所有 id
-  .get("/ids", async () => {
-    const result = await aliyunECS.describeInstances();
-    const ids = result.instances?.instance?.map((instance) =>
-      instance.instanceId
-    );
-    return ids;
-  }, {
-    query: queryStringSchema,
-  })
-  // 根據 id 得到實例狀態
-  .get("/status/:id", async ({ params: { id } }) => {
-    const result = await sqliteDB.getInstanceById(id);
-    if (result === null) {
-      return { msg: "id not found" };
-    }
-    return result;
-  }, {
-    query: queryStringSchema,
-  })
-  // 取得所有實例狀態
-  .get("/list", async () => await sqliteDB.getInstances(), {
-    query: queryStringSchema,
-  });
-
-// PAC 文件路由組
-const pacFileRoutes = new Elysia()
-  // 產生指定實例的 proxy.pac
-  .get("/pacfile/:id", async ({ params: { id } }) => {
-    const instance = await sqliteDB.getInstanceById(id);
-    if (instance === null || !isReady(instance) || !instance.ip) {
-      return "id not found, instance not ready, or IP not set";
-    }
-    const pacFile = generatePACFile(getProxyTarget(), instance.ip);
-    return pacFile;
-  }, {
-    query: queryStringSchema,
-  })
-  // 產生隨機實例的 proxy.pac
-  .get("/pacfile", async () => {
-    const allInstances = await sqliteDB.getInstances();
-    const instances = allInstances.filter((instance) =>
-      isReady(instance)
-    );
-    if (instances.length === 0) {
-      return "no instance";
+  .onError(({ error, code, set }) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (code === "VALIDATION") {
+      logger.error("請求處理失敗", { code });
+      set.status = 400;
+      return { error: "Invalid request" };
     }
 
-    const instance = instances[Math.floor(Math.random() * instances.length)];
-    if (!instance.ip) {
-      return "selected instance has no IP set";
-    }
-    const pacFile = generatePACFile(getProxyTarget(), instance.ip);
-    return pacFile;
-  }, {
-    query: queryStringSchema,
-  });
-
-// 安全組管理路由組
-const securityGroupRoutes = new Elysia()
-  // 根據請求頭設定安全組
-  .get("/setSecurity", async ({ request }) => {
-    logger.debug("收到設定安全組請求", { headers: Object.fromEntries(request.headers.entries()) });
-
-    // 從請求頭中獲取 IP 地址
-    const headerNames = checkHeaders.split(";");
-    const clientIp = getIpFromHeaders(request.headers, headerNames) ||
-      request.headers.get('x-forwarded-for') ||
-      request.headers.get('x-real-ip') ||
-      '127.0.0.1';
-
-    logger.info("檢測到客戶端 IP", { clientIp });
-
-    const ipv4Ip = addressToIpv4(clientIp);
-
-    if (!ipTools.isV4Format(ipv4Ip)) {
-      logger.error("無效的 IPv4 地址", { ipv4Ip });
-      return "not a valid ipv4";
-    }
-
-    logger.info("撤銷現有安全組規則");
-    await aliyunECS.revokeSecurityGroup();
-
-    logger.info("授權安全組", { ipv4Ip });
-    const result = await aliyunECS.authorizeSecurityGroup(
-      true,
-      true,
-      true,
-      ipv4Ip,
-    );
-
-    logger.info("安全組設定完成", { result });
-    return result;
-  }, {
-    query: queryStringSchema,
+    logger.error("請求處理失敗", { code, error: message });
+    set.status = isNotFoundError(message) ? 404 : isClientInputError(message) ? 400 : 500;
+    return { error: message };
   })
-  // 根據指定 IP 設定安全組
-  .get("/setSecurity/:ip", async ({ params: { ip } }) => {
-    await aliyunECS.revokeSecurityGroup();
-    const result = await aliyunECS.authorizeSecurityGroup(true, true, true, ip);
-    return result;
-  }, {
-    query: queryStringSchema,
-  });
+  .get("/", () => serveSpaIndex(), { detail: { summary: "Admin UI" } })
+  .get("/assets/:file", async ({ params }) => serveSpaAsset(params.file), { detail: { summary: "Admin UI asset" } })
+  .get("/login", () => loginPage(), { detail: { summary: "Login page" } })
+  .post("/login", async ({ request }) => {
+    const formData = await request.formData();
+    const adminKeyEntry = formData.get("adminKey");
+    const adminKey = typeof adminKeyEntry === "string" ? adminKeyEntry : "";
+    const keyMatches = await constantTimeEqualText(adminKey, appConfig.apiKey);
 
-// 主應用
-const app = new Elysia()
-  // 使用 API 認證中間件
-  .use(authMiddleware)
-  // 使用 Swagger 文檔
-  .use(
-    swagger({
-      path: "/swagger",
-      documentation: {
-        info: { version: getVersion(), title: "cloud-proxy-hub" },
+    if (!keyMatches) {
+      return unauthorizedLoginPage();
+    }
+
+    const expiresAt = Date.now() + sessionCookieMaxAgeSeconds * 1000;
+    const sessionCookieValue = await buildSessionCookieValue(expiresAt);
+
+    return new Response(null, {
+      status: 303,
+      headers: {
+        location: "/",
+        "set-cookie": buildSessionCookieHeader(request.url, sessionCookieValue),
       },
-    }),
+    });
+  })
+  .post(
+    "/logout",
+    async ({ request }) =>
+      new Response(null, {
+        status: 303,
+        headers: {
+          location: "/login",
+          "set-cookie": buildClearedSessionCookieHeader(request.url),
+        },
+      }),
   )
-  // 使用各個路由組
-  .use(instanceManagementRoutes)
-  .use(instanceQueryRoutes)
-  .use(pacFileRoutes)
-  .use(securityGroupRoutes)
-  .listen(3000);
+  .get("/health", () => ({ ok: true, service: "terraform-platform" }))
+  .get("/ui/bootstrap", async () => ({
+    providerTypes: await store.listProviderTypes(),
+    keys: await store.listKeys(),
+    templates: await store.listTemplates(),
+    shells: await store.listShells(),
+    apis: await store.listApis(),
+  }))
+  .post(
+    "/ui/providers/:providerTypeId/keys",
+    async ({ params, body }) => store.saveKey({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: keySchema },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/keys/:keyId",
+    async ({ params, body }) => store.saveKey({ ...body, id: params.keyId, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }), body: keySchema },
+  )
+  .get(
+    "/ui/providers/:providerTypeId/keys/:keyId",
+    async ({ params }) => store.getPublicKey(params.providerTypeId, params.keyId),
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }) },
+  )
+  .delete(
+    "/ui/providers/:providerTypeId/keys/:keyId",
+    async ({ params }) => {
+      await store.deleteKey(params.providerTypeId, params.keyId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }) },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/templates",
+    async ({ params, body }) => {
+      const input = { ...body, providerTypeId: params.providerTypeId };
+      await terraform.validateTemplate(input);
+      return store.saveTemplate(input);
+    },
+    { params: t.Object({ providerTypeId: idSchema }), body: templateSchema },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/templates/:templateId",
+    async ({ params, body }) => {
+      const input = { ...body, id: params.templateId, providerTypeId: params.providerTypeId };
+      await terraform.validateTemplate(input);
+      return store.saveTemplate(input);
+    },
+    { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }), body: templateSchema },
+  )
+  .get(
+    "/ui/providers/:providerTypeId/templates/:templateId",
+    async ({ params }) => store.getTemplate(params.providerTypeId, params.templateId),
+    { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
+  )
+  .delete(
+    "/ui/providers/:providerTypeId/templates/:templateId",
+    async ({ params }) => {
+      await store.deleteTemplate(params.providerTypeId, params.templateId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/shells",
+    async ({ params, body }) => store.saveShell({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: shellSchema },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/shells/:shellId",
+    async ({ params, body }) => store.saveShell({ ...body, id: params.shellId, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }), body: shellSchema },
+  )
+  .get(
+    "/ui/providers/:providerTypeId/shells/:shellId",
+    async ({ params }) => store.getShell(params.providerTypeId, params.shellId),
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }) },
+  )
+  .delete(
+    "/ui/providers/:providerTypeId/shells/:shellId",
+    async ({ params }) => {
+      await store.deleteShell(params.providerTypeId, params.shellId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }) },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/apis",
+    async ({ params, body }) => store.saveApi({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: apiSchema },
+  )
+  .post(
+    "/ui/providers/:providerTypeId/apis/:apiId",
+    async ({ params, body }) => store.saveApi({ ...body, id: params.apiId, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema, apiId: idSchema }), body: apiSchema },
+  )
+  .get("/ui/apis/:apiId", async ({ params }) => store.getApi(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .delete(
+    "/ui/apis/:apiId",
+    async ({ params }) => {
+      await store.deleteApi(params.apiId);
+      return { ok: true };
+    },
+    { params: t.Object({ apiId: idSchema }) },
+  )
+  .post(
+    "/ui/deployments/:apiId/deploy",
+    async ({ params, body }) => terraform.deploy(await store.getApi(params.apiId), body),
+    { params: t.Object({ apiId: idSchema }), body: runSchema },
+  )
+  .post(
+    "/ui/deployments/:apiId/deploy/start",
+    async ({ params, body }) => terraform.startDeploy(await store.getApi(params.apiId), body),
+    { params: t.Object({ apiId: idSchema }), body: runSchema },
+  )
+  .post(
+    "/ui/deployments/:apiId/delete",
+    async ({ params, body }) => terraform.delete(await store.getApi(params.apiId), body),
+    { params: t.Object({ apiId: idSchema }), body: runSchema },
+  )
+  .post(
+    "/ui/deployments/:apiId/delete/start",
+    async ({ params, body }) => terraform.startDelete(await store.getApi(params.apiId), body),
+    { params: t.Object({ apiId: idSchema }), body: runSchema },
+  )
+  .get("/ui/deployments/:apiId/status", async ({ params }) => terraform.status(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/ui/deployments/:apiId/output", async ({ params }) => terraform.output(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/ui/deployments/:apiId/runs", async ({ params }) => store.listRuns(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/ui/deployments/:apiId/examples", async ({ params }) => store.getRuntimeCallExample(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get(
+    "/ui/deployments/:apiId/runs/:runId/events/stream",
+    async ({ params, request }) => runEventsStream(params.apiId, params.runId, request),
+    { params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }) },
+  )
+  .get("/ui/deployments/:apiId/runs/:runId/init-log", async ({ params }) => store.getInitShellLog(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
+  .get("/ui/deployments/:apiId/runs/:runId/events", async ({ params }) => store.listRunEvents(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
+  .get("/ui/deployments/:apiId/runs/:runId", async ({ params }) => store.getRun(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
+  .get("/api/provider-types", async () => store.listProviderTypes())
+  .get("/api/providers/:providerTypeId/keys", async ({ params }) => store.listKeys(params.providerTypeId), {
+    params: t.Object({ providerTypeId: idSchema }),
+  })
+  .post(
+    "/api/providers/:providerTypeId/keys",
+    async ({ params, body }) => store.saveKey({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: keySchema },
+  )
+  .put(
+    "/api/providers/:providerTypeId/keys/:keyId",
+    async ({ params, body }) => store.saveKey({ ...body, id: params.keyId, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }), body: keySchema },
+  )
+  .get(
+    "/api/providers/:providerTypeId/keys/:keyId",
+    async ({ params }) => store.getPublicKey(params.providerTypeId, params.keyId),
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }) },
+  )
+  .delete(
+    "/api/providers/:providerTypeId/keys/:keyId",
+    async ({ params }) => {
+      await store.deleteKey(params.providerTypeId, params.keyId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }) },
+  )
+  .post(
+    "/api/providers/:providerTypeId/keys/:keyId/test",
+    async ({ params }) => terraform.testKey(params.providerTypeId, params.keyId),
+    { params: t.Object({ providerTypeId: idSchema, keyId: idSchema }) },
+  )
+  .get("/api/providers/:providerTypeId/templates", async ({ params }) => store.listTemplates(params.providerTypeId), {
+    params: t.Object({ providerTypeId: idSchema }),
+  })
+  .post(
+    "/api/providers/:providerTypeId/templates",
+    async ({ params, body }) => {
+      const input = { ...body, providerTypeId: params.providerTypeId };
+      await terraform.validateTemplate(input);
+      return store.saveTemplate(input);
+    },
+    { params: t.Object({ providerTypeId: idSchema }), body: templateSchema },
+  )
+  .put(
+    "/api/providers/:providerTypeId/templates/:templateId",
+    async ({ params, body }) => {
+      const input = { ...body, id: params.templateId, providerTypeId: params.providerTypeId };
+      await terraform.validateTemplate(input);
+      return store.saveTemplate(input);
+    },
+    { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }), body: templateSchema },
+  )
+  .get(
+    "/api/providers/:providerTypeId/templates/:templateId",
+    async ({ params }) => store.getTemplate(params.providerTypeId, params.templateId),
+    { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
+  )
+  .delete(
+    "/api/providers/:providerTypeId/templates/:templateId",
+    async ({ params }) => {
+      await store.deleteTemplate(params.providerTypeId, params.templateId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
+  )
+  .get("/api/providers/:providerTypeId/shells", async ({ params }) => store.listShells(params.providerTypeId), {
+    params: t.Object({ providerTypeId: idSchema }),
+  })
+  .post(
+    "/api/providers/:providerTypeId/shells",
+    async ({ params, body }) => store.saveShell({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: shellSchema },
+  )
+  .put(
+    "/api/providers/:providerTypeId/shells/:shellId",
+    async ({ params, body }) => store.saveShell({ ...body, id: params.shellId, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }), body: shellSchema },
+  )
+  .get(
+    "/api/providers/:providerTypeId/shells/:shellId",
+    async ({ params }) => store.getShell(params.providerTypeId, params.shellId),
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }) },
+  )
+  .delete(
+    "/api/providers/:providerTypeId/shells/:shellId",
+    async ({ params }) => {
+      await store.deleteShell(params.providerTypeId, params.shellId);
+      return { ok: true };
+    },
+    { params: t.Object({ providerTypeId: idSchema, shellId: idSchema }) },
+  )
+  .get("/api/providers/:providerTypeId/apis", async ({ params }) => store.listApis(params.providerTypeId), {
+    params: t.Object({ providerTypeId: idSchema }),
+  })
+  .post(
+    "/api/providers/:providerTypeId/apis",
+    async ({ params, body }) => store.saveApi({ ...body, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema }), body: apiSchema },
+  )
+  .put(
+    "/api/providers/:providerTypeId/apis/:apiId",
+    async ({ params, body }) => store.saveApi({ ...body, id: params.apiId, providerTypeId: params.providerTypeId }),
+    { params: t.Object({ providerTypeId: idSchema, apiId: idSchema }), body: apiSchema },
+  )
+  .get("/api/apis/:apiId", async ({ params }) => store.getApi(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .delete(
+    "/api/apis/:apiId",
+    async ({ params }) => {
+      await store.deleteApi(params.apiId);
+      return { ok: true };
+    },
+    { params: t.Object({ apiId: idSchema }) },
+  )
+  .post(
+    "/api/deployments/:apiId/deploy",
+    async ({ params, body }) => terraform.deploy(await store.getApi(params.apiId), body),
+    {
+      params: t.Object({ apiId: idSchema }),
+      body: runSchema,
+    },
+  )
+  .post(
+    "/api/deployments/:apiId/delete",
+    async ({ params, body }) => terraform.delete(await store.getApi(params.apiId), body),
+    {
+      params: t.Object({ apiId: idSchema }),
+      body: runSchema,
+    },
+  )
+  .get("/api/deployments/:apiId/status", async ({ params }) => terraform.status(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/api/deployments/:apiId/output", async ({ params }) => terraform.output(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/api/deployments/:apiId/runs", async ({ params }) => store.listRuns(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/api/deployments/:apiId/examples", async ({ params }) => store.getRuntimeCallExample(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get("/api/deployments/:apiId/runs/:runId/events", async ({ params }) => store.listRunEvents(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
+  .get("/api/deployments/:apiId/runs/:runId/init-log", async ({ params }) => store.getInitShellLog(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
+  .get("/api/deployments/:apiId/runs/:runId", async ({ params }) => store.getRun(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
+  .post(
+    "/callbacks/init-shell/:apiId/:runId",
+    async ({ params, request }) => handleInitShellCallback(params.apiId, params.runId, request),
+    { params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }) },
+  )
+  .listen(appConfig.port);
 
-// 輸出所有環境變數配置
-logAllEnvironmentVariables();
+logger.info(
+  "Terraform 管理平台啟動完成",
+  redact({ port: appConfig.port, configDir: appConfig.configDir, dataDir: appConfig.dataDir }) as Record<
+    string,
+    unknown
+  >,
+);
 
-// 啟動定時任務
-logger.info("啟動定時清理任務");
-clearInstanceJob.start();
+const spaDistDirectory = new URL("../web/dist/", import.meta.url);
 
-if (enableForceClear) {
-  logger.info("啟動強制清理任務", { cronTime: forceCronTime, timeZone: forceClearTimeZone });
-  forceClearJob.cronTime = new CronTime(forceCronTime, forceClearTimeZone);
-  forceClearJob.start();
+async function serveSpaIndex() {
+  const file = Bun.file(new URL("index.html", spaDistDirectory));
+  if (!(await file.exists())) {
+    return new Response("Admin UI has not been built. Run bun run build.", { status: 503 });
+  }
+
+  return new Response(file, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
 }
 
-// 輸出服務啟動信息
-logger.info("服務啟動成功", {
-  hostname: app.server?.hostname,
-  port: app.server?.port,
-  swagger: `http://${app.server?.hostname}:${app.server?.port}/swagger`,
-});
+async function serveSpaAsset(fileName: string) {
+  if (!/^[a-zA-Z0-9._-]+$/.test(fileName)) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const file = Bun.file(new URL(`assets/${fileName}`, spaDistDirectory));
+  if (!(await file.exists())) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  return new Response(file, {
+    headers: {
+      "content-type": assetContentType(fileName),
+      "cache-control": "public, max-age=31536000, immutable",
+    },
+  });
+}
+
+function assetContentType(fileName: string) {
+  if (fileName.endsWith(".js")) {
+    return "text/javascript; charset=utf-8";
+  }
+  if (fileName.endsWith(".css")) {
+    return "text/css; charset=utf-8";
+  }
+  if (fileName.endsWith(".svg")) {
+    return "image/svg+xml";
+  }
+  if (fileName.endsWith(".png")) {
+    return "image/png";
+  }
+  if (fileName.endsWith(".woff2")) {
+    return "font/woff2";
+  }
+  return "application/octet-stream";
+}
+
+async function runEventsStream(apiId: string, runId: string, request: Request) {
+  await store.getRun(apiId, runId);
+  let sentCount = 0;
+  let pollTimer: Timer | undefined;
+  let closed = false;
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const close = () => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        if (pollTimer) {
+          clearInterval(pollTimer);
+        }
+        request.signal.removeEventListener("abort", close);
+        controller.close();
+      };
+
+      const sendPendingEvents = async () => {
+        if (closed) {
+          return;
+        }
+        const events = await store.listRunEvents(apiId, runId);
+        const pendingEvents = events.slice(sentCount);
+        for (const event of pendingEvents) {
+          controller.enqueue(encoder.encode(formatSseEvent(event.id, event.type, event)));
+        }
+        sentCount = events.length;
+
+        if (await shouldCloseRunEventsStream(apiId, runId, events)) {
+          close();
+        }
+      };
+
+      request.signal.addEventListener("abort", close);
+      await sendPendingEvents();
+      if (closed) {
+        return;
+      }
+      pollTimer = setInterval(() => {
+        void sendPendingEvents().catch((error) => {
+          if (!closed) {
+            closed = true;
+            if (pollTimer) {
+              clearInterval(pollTimer);
+            }
+            controller.error(error);
+          }
+        });
+      }, 1000);
+    },
+    cancel() {
+      closed = true;
+      if (pollTimer) {
+        clearInterval(pollTimer);
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    },
+  });
+}
+
+async function handleInitShellCallback(apiId: string, runId: string, request: Request) {
+  const contentLengthHeader = request.headers.get("content-length") ?? "";
+  if (!/^\d+$/.test(contentLengthHeader)) {
+    return new Response("Length required", { status: 411 });
+  }
+  const contentLength = Number(contentLengthHeader);
+  if (contentLength > initShellCallbackMaxBytes) {
+    return new Response("Payload too large", { status: 413 });
+  }
+  const token = new URL(request.url).searchParams.get("token") ?? "";
+  const claims = await verifyInitShellCallbackToken(token, apiId, runId);
+  if (!claims) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength > initShellCallbackMaxBytes) {
+    return new Response("Payload too large", { status: 413 });
+  }
+  try {
+    await store.appendInitShellLog(apiId, runId, {
+      nonce: claims.nonce,
+      content: new TextDecoder().decode(bytes),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("already used")) {
+      return new Response("Conflict", { status: 409 });
+    }
+    if (error instanceof Error && error.message.includes("has no init shell")) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    throw error;
+  }
+  return { ok: true };
+}
+
+async function shouldCloseRunEventsStream(apiId: string, runId: string, events: Array<{ type: string }>) {
+  if (!events.some((event) => event.type === "succeeded" || event.type === "failed")) {
+    return false;
+  }
+  const initLog = await store.getInitShellLog(apiId, runId);
+  return !initLog.enabled || initLog.status !== "waiting";
+}
+
+function formatSseEvent(id: string, eventName: string, data: unknown) {
+  return `id: ${id}\nevent: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function loginPage() {
+  return new Response(loginPageHtml(), {
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+function unauthorizedLoginPage() {
+  return new Response(loginPageHtml("Invalid admin key."), {
+    status: 401,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+function loginPageHtml(message?: string) {
+  return `<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>Login - Terraform Platform</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f7f7f4; color: #1e2428; }
+    main { width: min(420px, calc(100vw - 32px)); background: white; border: 1px solid #ddd8cc; border-radius: 16px; padding: 28px; box-sizing: border-box; }
+    label { display: block; margin: 16px 0 8px; }
+    input { width: 100%; box-sizing: border-box; padding: 12px 14px; border: 1px solid #cfc8ba; border-radius: 10px; font: inherit; }
+    button { margin-top: 18px; width: 100%; border: 0; background: #1e2428; color: white; border-radius: 10px; padding: 12px 14px; font: inherit; cursor: pointer; }
+    .error { margin: 0 0 12px; color: #b42318; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Terraform Platform Login</h1>
+    ${message ? `<p class="error">${message}</p>` : ""}
+    <form method="post" action="/login">
+      <label for="adminKey">Admin Key</label>
+      <input id="adminKey" name="adminKey" type="password" autocomplete="current-password" required />
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
+function buildSessionCookieHeader(requestUrl: string, cookieValue: string) {
+  return buildCookieHeader(requestUrl, cookieValue, sessionCookieMaxAgeSeconds);
+}
+
+function buildClearedSessionCookieHeader(requestUrl: string) {
+  return buildCookieHeader(requestUrl, "", 0);
+}
+
+function buildCookieHeader(requestUrl: string, cookieValue: string, maxAgeSeconds: number) {
+  const secureAttribute = new URL(requestUrl).protocol === "https:" ? "; Secure" : "";
+  return `${sessionCookieName}=${cookieValue}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureAttribute}`;
+}
+
+function isCrossOriginUiMutation(path: string, request: Request) {
+  if (!path.startsWith("/ui/") || request.method === "GET") {
+    return false;
+  }
+
+  const origin = request.headers.get("origin");
+  return origin !== null && origin !== new URL(request.url).origin;
+}
+
+async function hasValidSessionCookie(request: Request) {
+  const cookieHeader = request.headers.get("cookie");
+  const sessionCookie = getCookieValue(cookieHeader, sessionCookieName);
+  if (!sessionCookie) {
+    return false;
+  }
+
+  const [expiresAtText, providedSignature, ...rest] = sessionCookie.split(".");
+  if (!expiresAtText || !providedSignature || rest.length > 0 || !/^\d+$/.test(expiresAtText)) {
+    return false;
+  }
+
+  const expiresAt = Number(expiresAtText);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
+    return false;
+  }
+
+  const expectedSignature = await signSessionCookie(expiresAt);
+  return constantTimeEqualText(providedSignature, expectedSignature);
+}
+
+function getCookieValue(cookieHeader: string | null, cookieName: string) {
+  if (!cookieHeader) {
+    return "";
+  }
+
+  for (const part of cookieHeader.split(";")) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === cookieName) {
+      return rest.join("=");
+    }
+  }
+
+  return "";
+}
+
+async function constantTimeEqualText(left: string, right: string) {
+  const [leftBytes, rightBytes] = await Promise.all([sha256Bytes(left), sha256Bytes(right)]);
+  return constantTimeEqualBytes(new Uint8Array(leftBytes), new Uint8Array(rightBytes));
+}
+
+function constantTimeEqualBytes(left: Uint8Array, right: Uint8Array) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  let mismatch = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    mismatch |= left[index] ^ right[index];
+  }
+
+  return mismatch === 0;
+}
+
+async function buildSessionCookieValue(expiresAt: number) {
+  return `${expiresAt}.${await signSessionCookie(expiresAt)}`;
+}
+
+async function signSessionCookie(expiresAt: number) {
+  return sha256Hex(`${expiresAt}:${sessionCookieSecret}`);
+}
+
+async function deriveSessionCookieSecret() {
+  return sha256Hex(`terraform-platform-session-secret:${appConfig.apiKey}`);
+}
+
+async function sha256Hex(value: string) {
+  const bytes = await sha256Bytes(value);
+  return bytesToHex(new Uint8Array(bytes));
+}
+
+async function sha256Bytes(value: string) {
+  return crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+}
+
+function bytesToHex(bytes: Uint8Array) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function isClientInputError(message: string) {
+  return (
+    message.startsWith("Template file ") ||
+    message.startsWith("Action ") ||
+    message.startsWith("Missing variables: ") ||
+    message.startsWith("Variable ") ||
+    message.startsWith("Shell ") ||
+    message.includes("not supported") ||
+    message.includes("referenced by API")
+  );
+}
+
+function isNotFoundError(message: string) {
+  return (message.startsWith("API ") || message.startsWith("Run ")) && message.endsWith("not found");
+}
+
+export type App = typeof app;

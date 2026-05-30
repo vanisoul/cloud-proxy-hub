@@ -1,27 +1,9 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 設定變數
-IMAGE_REPO="${IMAGE_REPO:-hub.docker.com}"
-IMAGE_NAME="cloud-proxy-hub"
+IMAGE_REPO="${IMAGE_REPO:-terraform-platform}"
 VERSION="${1:-latest}"
-PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 
-echo "Building ${IMAGE_REPO}/${IMAGE_NAME}:${VERSION} for platforms: ${PLATFORMS} ..."
+docker build -t "${IMAGE_REPO}:${VERSION}" -t "${IMAGE_REPO}:latest" .
 
-# 建立 tags 參數
-TAGS_CMD="-t ${IMAGE_REPO}/${IMAGE_NAME}:${VERSION}"
-TAGS="${IMAGE_REPO}/${IMAGE_NAME}:${VERSION}"
-if [ "${VERSION}" != "latest" ]; then
-  TAGS_CMD="${TAGS_CMD} -t ${IMAGE_REPO}/${IMAGE_NAME}:latest"
-  TAGS="${TAGS} ${IMAGE_REPO}/${IMAGE_NAME}:latest"
-fi
-
-docker build \
-  --platform "${PLATFORMS}" \
-  ${TAGS_CMD} \
-  .
-
-docker push ${TAGS}
-
-echo "Done! Image pushed: ${DOCKER_USER}/${IMAGE_NAME}:${VERSION}"
+echo "Built ${IMAGE_REPO}:${VERSION}"
