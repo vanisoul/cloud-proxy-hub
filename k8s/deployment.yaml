@@ -16,6 +16,10 @@ spec:
       labels:
         app.kubernetes.io/name: terraform-platform
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: terraform-platform
           image: ghcr.io/your-org/terraform-platform:0.1.0

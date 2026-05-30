@@ -31,7 +31,7 @@ image: ghcr.io/your-org/terraform-platform:0.1.0
 Create a real admin key Secret instead of using the placeholder value:
 
 ```bash
-kubectl create namespace terraform-platform
+kubectl create namespace terraform-platform --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n terraform-platform create secret generic terraform-platform-secret \
   --from-literal=ADMIN_API_KEY='replace-with-a-long-random-value' \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -91,5 +91,6 @@ These are filesystem paths inside the container/PVCs, not HTTP routes, and must 
 - Keep `Service` as `ClusterIP`; publish only through an Ingress or a private gateway you control.
 - Use TLS for any public Ingress because admin sessions and bearer-token API calls traverse it.
 - Adjust PVC sizes and add `storageClassName` if your cluster does not provide a suitable default StorageClass.
+- Use an encrypted StorageClass and restrict storage backup access because `/app/config` and `/app/data` contain provider keys, Terraform state, and run data.
 - Keep `replicas: 1` unless the storage and Terraform execution model is redesigned for concurrent writers.
 - Store the real `ADMIN_API_KEY` in your secret manager or deployment pipeline, not in Git.

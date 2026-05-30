@@ -12,6 +12,7 @@ metadata:
     # - /api/* requires Authorization: Bearer <ADMIN_API_KEY>
     # - /callbacks/init-shell/* accepts signed one-time init-shell log callbacks
     # Do not expose filesystem paths such as /app/config, /app/data, /config, or /data.
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-body-size: "2m"
 spec:
   ingressClassName: nginx
