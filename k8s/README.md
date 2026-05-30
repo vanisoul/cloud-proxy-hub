@@ -11,7 +11,7 @@ Replace the image, domain, TLS secret, storage class, and admin key before apply
 - `persistentvolumeclaims.yaml`: persistent volumes for platform config and Terraform runtime data.
 - `deployment.yaml`: single-replica Bun/Elysia app using the Docker image from this repository.
 - `service.yaml`: internal `ClusterIP` service.
-- `ingress.example.yaml`: public ingress example with path exposure notes in comments.
+- `ingress.example.yaml`: public callback ingress example with path exposure notes in comments.
 
 ## Deploy
 
@@ -63,18 +63,23 @@ Use server-side dry-run when a cluster is available:
 kubectl apply --dry-run=server -k k8s
 ```
 
-## Public Paths
+## Network Exposure
 
-The Ingress example routes `/` as a prefix, which allows these HTTP paths to reach the app:
+Security-first default: keep the admin service private. Expose only the callback path to the public internet when init-shell logs are enabled.
+
+Public path:
+
+- `/callbacks/init-shell/*`: signed one-time callback endpoint for VM init-shell logs. This must be reachable from deployed VMs when `PUBLIC_CALLBACK_BASE_URL` is configured.
+
+Internal-only paths by default:
 
 - `/`: admin UI entry point; unauthenticated users are redirected to `/login`.
 - `/login`: login form and login submit endpoint.
 - `/assets/*`: built SPA assets.
 - `/ui/*`: admin UI API, protected by the signed session cookie.
 - `/api/*`: automation/API routes, protected by `Authorization: Bearer <ADMIN_API_KEY>`.
-- `/callbacks/init-shell/*`: signed one-time callback endpoint for VM init-shell logs.
 
-Expose `/callbacks/init-shell/*` only when `PUBLIC_CALLBACK_BASE_URL` points at this public Ingress and deployed VMs need to post init-shell logs back.
+Expose admin UI/API paths only after an explicit risk review, ideally through VPN, private load balancer, bastion access, zero-trust access proxy, or another internal-only control plane.
 
 ## Non-Public Paths
 
