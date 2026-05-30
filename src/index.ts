@@ -80,10 +80,11 @@ const app = new Elysia()
       return;
     }
 
-    if (isCrossOriginUiMutation(path, request)) {
-      logger.warn("拒絕跨來源 UI 請求", { path, method: request.method });
-      return new Response("Forbidden", { status: 403 });
-    }
+    // 只讓 TOKEN 防禦, 避免多入口時的複雜化.
+    // if (isCrossOriginUiMutation(path, request)) {
+    //   logger.warn("拒絕跨來源 UI 請求", { path, method: request.method });
+    //   return new Response("Forbidden", { status: 403 });
+    // }
 
     const bearerAuthorized = headers.authorization?.replace(/^Bearer\s+/i, "") === appConfig.apiKey;
     if (path.startsWith("/api/")) {
