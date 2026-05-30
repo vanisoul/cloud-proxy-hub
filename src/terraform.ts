@@ -575,6 +575,13 @@ __terraform_platform_post_file() {
   printf '%s\n' "$__terraform_platform_seq" >"$__terraform_platform_init_seq"
   : >"$__terraform_platform_init_post"
 }
+__terraform_platform_post_done() {
+  : >"$__terraform_platform_init_post"
+  __terraform_platform_seq="$(cat "$__terraform_platform_init_seq")"
+  curl --connect-timeout 2 --max-time 10 -fsS -X POST "$__terraform_platform_init_callback&seq=$__terraform_platform_seq&done=1" -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_post" >/dev/null 2>&1 || true
+  __terraform_platform_seq=$((__terraform_platform_seq + 1))
+  printf '%s\n' "$__terraform_platform_seq" >"$__terraform_platform_init_seq"
+}
 __terraform_platform_flush_available() {
   __terraform_platform_offset="$(cat "$__terraform_platform_init_offset")"
   __terraform_platform_size="$(wc -c <"$__terraform_platform_init_log" | tr -d ' ')"
@@ -609,10 +616,7 @@ __terraform_platform_init_exit=$?
 touch "$__terraform_platform_init_done"
 wait "$__terraform_platform_poll_pid" 2>/dev/null || true
 __terraform_platform_flush_available
-__terraform_platform_seq="$(cat "$__terraform_platform_init_seq")"
-if [ "$__terraform_platform_seq" -eq 1 ]; then
-  curl --connect-timeout 2 --max-time 10 -fsS -X POST "$__terraform_platform_init_callback&seq=1" -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_chunk" >/dev/null 2>&1 || true
-fi
+__terraform_platform_post_done
 exit "$__terraform_platform_init_exit"
 `;
 }

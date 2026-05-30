@@ -236,6 +236,24 @@ body {
   white-space: pre-wrap;
 }
 
+.curl-example {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+
+.curl-example-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+}
+
+.curl-panel {
+  min-height: 0;
+  max-height: 180px;
+}
+
 .form-tip {
   margin: 0 0 var(--space-5);
 }

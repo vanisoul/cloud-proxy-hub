@@ -175,17 +175,24 @@ ${await Bun.file("web/src/App.vue").text()}`;
 
   it("defines focused runtime history, live events, and redacted event routes", async () => {
     const app = await Bun.file("web/src/App.vue").text();
+    const i18n = await Bun.file("web/src/i18n.ts").text();
+    const styles = await Bun.file("web/src/styles.css").text();
     const server = await Bun.file("src/index.ts").text();
     const storage = await Bun.file("src/storage.ts").text();
 
     expect(app).toContain('const runList = ref<TerraformRun[] | null>(null);');
     expect(app).toContain('const runEvents = ref<TerraformRunEvent[]>([]);');
+    expect(app).toContain('const runtimeCallExample = ref<RuntimeCallExample | null>(null);');
     expect(app).toContain('const runtimeRunDialogVisible = ref(false);');
     expect(app).toContain('type DisplayRunEvent = TerraformRunEvent & { groupedEventIds: string[] };');
     expect(app).toContain('const selectedRunEventId = ref("");');
     expect(app).toContain('const runEventDisplayRows = computed<DisplayRunEvent[]>(() => {');
+    expect(app).toContain('let initShellRowIndex = -1;');
+    expect(app).toContain('if (event.type === "init_shell_output" && initShellRowIndex !== -1)');
     expect(app).toContain('groupedEventIds: [...previous.groupedEventIds, event.id]');
+    expect(app).toContain('groupedEventIds: [...initShellRow.groupedEventIds, event.id]');
     expect(app).toContain('output: `${previous.output ?? ""}${event.output ?? ""}`');
+    expect(app).toContain('output: initShellLog.value?.content ?? `${initShellRow.output ?? ""}${event.output ?? ""}`');
     expect(app).toContain('const selectedRunEvent = computed(');
     expect(app).toContain('selectedRunEventId.value = "";\n    return;');
     expect(app).toContain('const activeRunLoading = computed(');
@@ -207,7 +214,20 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).toContain('@click.stop="selectRunEvent(row)"');
     expect(app).toContain('selectedRunEvent.output');
     expect(app).toContain('openRunEventsStream(api, runId, seq);');
+    expect(app).toContain('async function loadRuntimeExamples(seq = runtimeRequestSeq)');
+    expect(app).toContain('requestJson<RuntimeCallExample>(`/ui/deployments/${encodeURIComponent(api.id)}/examples`)');
+    expect(app).toContain('copyRuntimeCurl(runtimeCallExample.deploy.curl).catch(showError)');
+    expect(app).toContain('copyRuntimeCurl(runtimeCallExample.delete.curl).catch(showError)');
+    expect(app).toContain('{{ runtimeCallExample.deploy.curl }}');
+    expect(app).toContain('{{ runtimeCallExample.delete.curl }}');
     expect(app).toContain('"command_output"');
+    expect(app).toContain('previous.type === "init_shell_output" && event.type === "init_shell_output"');
+    expect(app).toContain('event.type === "init_shell_output" ? initShellLog.value?.content ?? event.output : event.output');
+    expect(app).toContain('async function finishInitShellStream(api: ApiPublication, runId: string, seq = runtimeRequestSeq)');
+    expect(app).toContain('let initShellLogRequestSeq = 0;');
+    expect(app).not.toContain('if (runDetail.value?.status === "succeeded" || runDetail.value?.status === "failed") {\n    closeRunEventsStream();\n  }');
+    expect(app).not.toContain('closeRunEventsStream();\n  ElMessage.success(t("message.runtimeFinished"');
+    expect(app).not.toContain('<pre v-else-if="initShellLog?.content" class="muted">{{ initShellLog.content }}</pre>');
     expect(app).toContain('new EventSource(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events/stream`)');
     expect(app).toContain('`/ui/deployments/${encodeURIComponent(api.id)}/${action}/start`');
     expect(app).toContain('requestJson<TerraformRunEvent[]>(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events`)');
@@ -217,17 +237,22 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).not.toContain('runtimeVarsJson');
     expect(app).not.toContain('runIdInput');
     expect(app).not.toContain('panel.latestRun');
-    expect(app).not.toContain('panel.externalExamples');
+    expect(app).toContain('panel.externalExamples');
     expect(app).not.toContain('panel.status');
     expect(app).not.toContain('panel.output');
     expect(app).not.toContain('formatJson');
     expect(app).not.toContain('<el-card shadow="never">\n                <template #header>{{ t("panel.runDetail") }}</template>');
     expect(server).toContain('"/ui/deployments/:apiId/deploy/start"');
     expect(server).toContain('"/ui/deployments/:apiId/delete/start"');
+    expect(server).toContain('"/ui/deployments/:apiId/examples"');
     expect(server).toContain('"/ui/deployments/:apiId/runs/:runId/events"');
     expect(server).toContain('"/api/deployments/:apiId/runs/:runId/events"');
     expect(server).toContain('"/ui/deployments/:apiId/runs/:runId/events/stream"');
     expect(server).toContain('"content-type": "text/event-stream; charset=utf-8"');
+    expect(i18n).toContain('"runtime.externalCallHint"');
+    expect(i18n).toContain('"runtime.deployCurl"');
+    expect(i18n).toContain('"runtime.deleteCurl"');
+    expect(styles).toContain('.curl-panel');
     expect(storage).toContain('events.redacted.ndjson');
   });
 
@@ -243,9 +268,10 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(server).toContain("shouldCloseRunEventsStream(apiId, runId, events)");
     expect(app).toContain('t("panel.initShellLog")');
     expect(app).toContain('initShellLog?.content');
-    expect(app).toContain('initShellLog.value?.status === "waiting"');
+    expect(app).toContain('initShellLog.value?.enabled && initShellLog.value.status !== "completed"');
     expect(app).toContain("finishInitShellStream");
     expect(types).toContain('export type InitShellLogResponse');
+    expect(types).toContain('"completed"');
   });
 
   it("keeps API deploy routes synchronous while adding UI async start routes", async () => {
@@ -378,6 +404,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
 
     const first = await fetch(`${callbackUrl}&seq=1`, { method: "POST", body: "init shell " });
     const second = await fetch(`${callbackUrl}&seq=2`, { method: "POST", body: "ok\n" });
+    const done = await fetch(`${callbackUrl}&seq=3&done=1`, { method: "POST", body: "" });
     const replay = await fetch(`${callbackUrl}&seq=1`, { method: "POST", body: "duplicate\n" });
     const logResponse = await fetch(`${server.origin}/api/deployments/safe-api/runs/run-1/init-log`, {
       headers: { authorization: "Bearer test-admin-key" },
@@ -390,8 +417,9 @@ ${await Bun.file("web/src/App.vue").text()}`;
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
+    expect(done.status).toBe(200);
     expect(replay.status).toBe(409);
-    expect(log).toMatchObject({ enabled: true, status: "received", content: "init shell ok\n" });
+    expect(log).toMatchObject({ enabled: true, status: "completed", content: "init shell ok\n" });
     expect(events.filter((event: { type: string }) => event.type === "init_shell_output")).toHaveLength(2);
   });
 
@@ -473,7 +501,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(exitCode).toBe(0);
     expect(stdout).toBe("no newline");
     expect(stderr).toBe("");
-    expect(log).toMatchObject({ enabled: true, status: "received", content: "no newline" });
+    expect(log).toMatchObject({ enabled: true, status: "completed", content: "no newline" });
   });
 
   it("streams generated init shell output before the script exits and preserves final partial output", async () => {
@@ -514,7 +542,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(exitCode).toBe(0);
     expect(stdout).toBe("first\nlast");
     expect(stderr).toBe("");
-    expect(finalLog).toMatchObject({ enabled: true, status: "received", content: "first\nlast" });
+    expect(finalLog).toMatchObject({ enabled: true, status: "completed", content: "first\nlast" });
   }, 12_000);
 
   it("executes the generated init shell wrapper and preserves the shell exit code after streaming callbacks", async () => {
@@ -555,7 +583,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(exitCode).toBe(7);
     expect(stdout).toBe("before failure\n");
     expect(stderr).toBe("");
-    expect(finalLog).toMatchObject({ enabled: true, status: "received", content: "before failure\n" });
+    expect(finalLog).toMatchObject({ enabled: true, status: "completed", content: "before failure\n" });
   }, 12_000);
 
   it("executes the generated init shell wrapper when content contains the default heredoc delimiter", async () => {
@@ -596,7 +624,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(exitCode).toBe(0);
     expect(stdout).toBe("__TERRAFORM_PLATFORM_INIT_SHELL__\n");
     expect(stderr).toBe("");
-    expect(log).toMatchObject({ enabled: true, status: "received", content: "__TERRAFORM_PLATFORM_INIT_SHELL__\n" });
+    expect(log).toMatchObject({ enabled: true, status: "completed", content: "__TERRAFORM_PLATFORM_INIT_SHELL__\n" });
   });
 
   it("executes the generated init shell wrapper and posts an empty callback for no output", async () => {
@@ -631,7 +659,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(exitCode).toBe(0);
     expect(stdout).toBe("");
     expect(stderr).toBe("");
-    expect(log).toMatchObject({ enabled: true, status: "received", content: "" });
+    expect(log).toMatchObject({ enabled: true, status: "completed", content: "" });
   });
 
   it("executes the generated init shell wrapper and posts large output in chunks", async () => {
@@ -667,7 +695,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(exitCode).toBe(0);
     expect(stdout).toBe(expected);
     expect(stderr).toBe("");
-    expect(log).toMatchObject({ enabled: true, status: "received", content: expected });
+    expect(log).toMatchObject({ enabled: true, status: "completed", content: expected });
   });
 
   it("executes the generated init shell wrapper without corrupting utf8 split across chunks", async () => {
@@ -703,7 +731,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(exitCode).toBe(0);
     expect(stdout).toBe(expected);
     expect(stderr).toBe("");
-    expect(log).toMatchObject({ enabled: true, status: "received", content: expected });
+    expect(log).toMatchObject({ enabled: true, status: "completed", content: expected });
   });
 
   it("keeps run event stream open when init shell output arrives before terminal status", async () => {
@@ -738,6 +766,65 @@ ${await Bun.file("web/src/App.vue").text()}`;
     await stream.reader.cancel();
   });
 
+  it("keeps run event stream open for multiple late init shell chunks after terminal status", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const cookie = await login(server.origin);
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "succeeded");
+    const stream = await openRunEventStream(server.origin, cookie, "safe-api", "run-1");
+
+    const terminalEvent = await readNextSseEvent(stream);
+    await writeInitShellLog(server.testRoot, "safe-api", "run-1", "late init 1\n");
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "init_shell_output");
+    const firstInitEvent = await readNextSseEvent(stream);
+    await writeInitShellLog(server.testRoot, "safe-api", "run-1", "late init 1\nlate init 2\n");
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "init_shell_output");
+    const secondInitEvent = await readNextSseEvent(stream);
+
+    expect(terminalEvent.event).toBe("succeeded");
+    expect(firstInitEvent.event).toBe("init_shell_output");
+    expect(secondInitEvent.event).toBe("init_shell_output");
+    await stream.reader.cancel();
+  });
+
+  it("keeps run event stream open for late init chunks after an old terminal status", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const cookie = await login(server.origin);
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "succeeded", new Date(Date.now() - 60_000).toISOString());
+    const stream = await openRunEventStream(server.origin, cookie, "safe-api", "run-1");
+
+    const terminalEvent = await readNextSseEvent(stream);
+    await writeInitShellLog(server.testRoot, "safe-api", "run-1", "late init 1\n");
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "init_shell_output");
+    const firstInitEvent = await readNextSseEvent(stream);
+    await writeInitShellLog(server.testRoot, "safe-api", "run-1", "late init 1\nlate init 2\n");
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "init_shell_output");
+    const secondInitEvent = await readNextSseEvent(stream);
+
+    expect(terminalEvent.event).toBe("succeeded");
+    expect(firstInitEvent.event).toBe("init_shell_output");
+    expect(secondInitEvent.event).toBe("init_shell_output");
+    await stream.reader.cancel();
+  });
+
+  it("closes run event stream only after init shell completion is recorded", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const cookie = await login(server.origin);
+    const oldTimestamp = new Date(Date.now() - 60_000).toISOString();
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "succeeded", oldTimestamp);
+    await writeInitShellLog(server.testRoot, "safe-api", "run-1", "complete init\n");
+    await writeInitShellCompletion(server.testRoot, "safe-api", "run-1");
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "init_shell_output", oldTimestamp);
+    const stream = await openRunEventStream(server.origin, cookie, "safe-api", "run-1");
+
+    const terminalEvent = await readNextSseEvent(stream);
+    const initEvent = await readNextSseEvent(stream);
+    const closed = await readRunEventStreamClosed(stream);
+
+    expect(terminalEvent.event).toBe("succeeded");
+    expect(initEvent.event).toBe("init_shell_output");
+    expect(closed).toBe(true);
+  });
+
   it("rejects invalid and oversized init shell callbacks", async () => {
     const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
     const token = await createTestCallbackToken("safe-api", "run-oversized", 60_000);
@@ -754,10 +841,15 @@ ${await Bun.file("web/src/App.vue").text()}`;
       method: "POST",
       body: "bad seq\n",
     });
+    const invalidDone = await fetch(`${server.origin}/callbacks/init-shell/safe-api/run-1?token=${encodeURIComponent(hugeSequenceToken)}&seq=1&done=true`, {
+      method: "POST",
+      body: "bad done\n",
+    });
 
     expect(invalid.status).toBe(401);
     expect(oversized.status).toBe(413);
     expect(hugeSequence.status).toBe(400);
+    expect(invalidDone.status).toBe(400);
   });
 });
 
@@ -953,13 +1045,17 @@ async function writeInitShellLog(testRoot: string, apiId: string, runId: string,
   await Bun.write(`${testRoot}/data/apis/${apiId}/runs/${runId}/init-shell.redacted.log`, content);
 }
 
-async function appendFixtureRunEvent(testRoot: string, apiId: string, runId: string, type: "init_shell_output" | "succeeded") {
+async function writeInitShellCompletion(testRoot: string, apiId: string, runId: string) {
+  await Bun.write(`${testRoot}/data/apis/${apiId}/runs/${runId}/init-shell.completed.json`, JSON.stringify({ completedAt: new Date().toISOString() }));
+}
+
+async function appendFixtureRunEvent(testRoot: string, apiId: string, runId: string, type: "init_shell_output" | "succeeded", createdAt = new Date().toISOString()) {
   await appendFile(`${testRoot}/data/apis/${apiId}/runs/${runId}/events.redacted.ndjson`, `${JSON.stringify({
     id: crypto.randomUUID(),
     apiId,
     runId,
     type,
-    createdAt: new Date().toISOString(),
+    createdAt,
     message: type,
   })}\n`);
 }
@@ -993,6 +1089,14 @@ async function readNextSseEvent(stream: { reader: ReadableStreamDefaultReader<Ui
     stream.buffer += decoder.decode(result.value, { stream: true });
   }
   throw new Error("Timed out waiting for run event stream event");
+}
+
+async function readRunEventStreamClosed(stream: { reader: ReadableStreamDefaultReader<Uint8Array>; buffer: string }) {
+  const result = await Promise.race([
+    stream.reader.read(),
+    Bun.sleep(3000).then(() => undefined),
+  ]);
+  return result?.done === true;
 }
 
 async function hmacSha256Base64Url(value: string, secret: string) {

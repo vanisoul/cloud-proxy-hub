@@ -22,6 +22,7 @@ import type {
   ProviderType,
   PublicProviderKey,
   PublicTerraformTemplate,
+  RuntimeCallExample,
   ShellResource,
   TerraformRun,
   TerraformRunEvent,
@@ -97,12 +98,14 @@ const runList = ref<TerraformRun[] | null>(null);
 const runDetail = ref<TerraformRun | null>(null);
 const runEvents = ref<TerraformRunEvent[]>([]);
 const initShellLog = ref<InitShellLogResponse | null>(null);
+const runtimeCallExample = ref<RuntimeCallExample | null>(null);
 const runtimeRunDialogVisible = ref(false);
 const selectedRunEventId = ref("");
 const currentLocale = ref<LocaleKey>(loadSavedLocale());
 const templateFiles = ref<Record<string, string>>({ "main.tf": sampleTemplate });
 let runEventsStream: EventSource | null = null;
 let runtimeRequestSeq = 0;
+let initShellLogRequestSeq = 0;
 
 const keyForm = reactive<KeyForm>({ name: "", description: "", env: {} });
 const templateForm = reactive<TemplateForm>({
@@ -149,8 +152,19 @@ const deleteDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.
 const activeRunLoading = computed(() => runDetail.value?.status === "queued" || runDetail.value?.status === "running");
 const runEventDisplayRows = computed<DisplayRunEvent[]>(() => {
   const rows: DisplayRunEvent[] = [];
+  let initShellRowIndex = -1;
 
   for (const event of runEvents.value) {
+    if (event.type === "init_shell_output" && initShellRowIndex !== -1) {
+      const initShellRow = rows[initShellRowIndex];
+      rows[initShellRowIndex] = {
+        ...initShellRow,
+        groupedEventIds: [...initShellRow.groupedEventIds, event.id],
+        output: initShellLog.value?.content ?? `${initShellRow.output ?? ""}${event.output ?? ""}`,
+      };
+      continue;
+    }
+
     const previous = rows[rows.length - 1];
     if (previous && canGroupRunEvent(previous, event)) {
       rows[rows.length - 1] = {
@@ -161,7 +175,10 @@ const runEventDisplayRows = computed<DisplayRunEvent[]>(() => {
       continue;
     }
 
-    rows.push({ ...event, groupedEventIds: [event.id] });
+    rows.push({ ...event, groupedEventIds: [event.id], output: event.type === "init_shell_output" ? initShellLog.value?.content ?? event.output : event.output });
+    if (event.type === "init_shell_output") {
+      initShellRowIndex = rows.length - 1;
+    }
   }
 
   return rows;
@@ -228,7 +245,7 @@ async function loadBootstrap() {
     if (!runtimeApiId.value || !state.apis.some((api) => api.id === runtimeApiId.value)) {
       runtimeApiId.value = providerApis.value[0]?.id ?? "";
     }
-    await loadRuntimeHistory(false);
+    await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq)]);
   } finally {
     loading.value = false;
   }
@@ -237,7 +254,7 @@ async function loadBootstrap() {
 async function providerChanged() {
   runtimeApiId.value = providerApis.value[0]?.id ?? "";
   resetRuntimePanels();
-  await loadRuntimeHistory(false);
+  await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq)]);
 }
 
 function selectPage(index: string) {
@@ -295,6 +312,9 @@ function runEventStatusType(event: TerraformRunEvent): ElementTagType {
 }
 
 function canGroupRunEvent(previous: TerraformRunEvent, event: TerraformRunEvent) {
+  if (previous.type === "init_shell_output" && event.type === "init_shell_output") {
+    return true;
+  }
   return (
     previous.type === "command_output" &&
     event.type === "command_output" &&
@@ -309,6 +329,11 @@ function selectRunEvent(event: DisplayRunEvent) {
     return;
   }
   selectedRunEventId.value = event.id;
+}
+
+async function copyRuntimeCurl(curl: string) {
+  await navigator.clipboard.writeText(curl);
+  ElMessage.success(t("message.curlCopied"));
 }
 
 function openKeyDialog(key?: PublicProviderKey) {
@@ -514,7 +539,19 @@ async function deleteResource(kind: ResourceKind, item: PublicProviderKey | Publ
 async function runtimeApiChanged() {
   closeRunEventsStream();
   resetRuntimePanels();
-  await loadRuntimeHistory(false);
+  await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq)]);
+}
+
+async function loadRuntimeExamples(seq = runtimeRequestSeq) {
+  const api = selectedRuntimeApi.value;
+  if (!api) {
+    runtimeCallExample.value = null;
+    return;
+  }
+  const result = await requestJson<RuntimeCallExample>(`/ui/deployments/${encodeURIComponent(api.id)}/examples`);
+  if (isCurrentRuntimeRequest(seq, api)) {
+    runtimeCallExample.value = result;
+  }
 }
 
 async function runtimeAction(action: DeploymentAction) {
@@ -569,7 +606,7 @@ async function viewRun(runId: string) {
       return;
     }
     runtimeRunDialogVisible.value = true;
-    if (runDetail.value?.status === "queued" || runDetail.value?.status === "running" || initShellLog.value?.status === "waiting") {
+    if (runDetail.value?.status === "queued" || runDetail.value?.status === "running" || (initShellLog.value?.enabled && initShellLog.value.status !== "completed")) {
       openRunEventsStream(api, runId, seq);
     }
     ElMessage.success(t("message.runDetailLoaded"));
@@ -633,10 +670,11 @@ function openRunEventsStream(api: ApiPublication, runId: string, seq = runtimeRe
 }
 
 async function loadInitShellLog(api: ApiPublication, runId: string, seq = runtimeRequestSeq) {
+  const initSeq = (initShellLogRequestSeq += 1);
   const result = await requestJson<InitShellLogResponse>(
     `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}/init-log`,
   );
-  if (isCurrentRuntimeRequest(seq, api)) {
+  if (isCurrentRuntimeRequest(seq, api) && initSeq === initShellLogRequestSeq) {
     initShellLog.value = result;
   }
 }
@@ -673,7 +711,7 @@ async function refreshTerminalRunAfterStreamError(api: ApiPublication, runId: st
   initShellLog.value = loadedInitShellLog;
   if (run.status === "succeeded" || run.status === "failed" || run.status === "needs_attention") {
     runDetail.value = run;
-    if (loadedInitShellLog.status !== "waiting") {
+    if (!loadedInitShellLog.enabled || loadedInitShellLog.status === "completed") {
       closeRunEventsStream();
     }
     await loadRuns(api, false, seq);
@@ -691,10 +729,6 @@ async function finalizeRunStream(api: ApiPublication, runId: string, seq = runti
   runDetail.value = run;
   initShellLog.value = loadedInitShellLog;
   await loadRuns(api, false, seq);
-  if (loadedInitShellLog.status === "waiting") {
-    return;
-  }
-  closeRunEventsStream();
   ElMessage.success(t("message.runtimeFinished", { action: run.action, status: run.status }));
 }
 
@@ -702,9 +736,6 @@ async function finishInitShellStream(api: ApiPublication, runId: string, seq = r
   await loadInitShellLog(api, runId, seq);
   if (!isCurrentRuntimeRequest(seq, api)) {
     return;
-  }
-  if (runDetail.value?.status === "succeeded" || runDetail.value?.status === "failed") {
-    closeRunEventsStream();
   }
 }
 
@@ -724,6 +755,7 @@ function resetRuntimePanels() {
   runDetail.value = null;
   runEvents.value = [];
   initShellLog.value = null;
+  runtimeCallExample.value = null;
   selectedRunEventId.value = "";
   runtimeRunDialogVisible.value = false;
 }
@@ -989,6 +1021,24 @@ function t(key: TranslationKey, params?: TranslationParams) {
                   <el-button type="danger" :disabled="deleteDisabled" :loading="actionLoading" @click="runtimeAction('delete')">{{ t("action.terraformDelete") }}</el-button>
                 </el-space>
               </el-form>
+              <el-divider />
+              <h3>{{ t("panel.externalExamples") }}</h3>
+              <p class="muted">{{ t("runtime.externalCallHint") }}</p>
+              <div v-if="runtimeCallExample?.deploy" class="curl-example">
+                <div class="curl-example-header">
+                  <strong>{{ t("runtime.deployCurl") }}</strong>
+                  <el-button size="small" text type="primary" @click="copyRuntimeCurl(runtimeCallExample.deploy.curl).catch(showError)">{{ t("action.copy") }}</el-button>
+                </div>
+                <pre class="code-panel curl-panel">{{ runtimeCallExample.deploy.curl }}</pre>
+              </div>
+              <div v-if="runtimeCallExample?.delete" class="curl-example">
+                <div class="curl-example-header">
+                  <strong>{{ t("runtime.deleteCurl") }}</strong>
+                  <el-button size="small" text type="primary" @click="copyRuntimeCurl(runtimeCallExample.delete.curl).catch(showError)">{{ t("action.copy") }}</el-button>
+                </div>
+                <pre class="code-panel curl-panel">{{ runtimeCallExample.delete.curl }}</pre>
+              </div>
+              <el-empty v-if="!runtimeCallExample?.deploy && !runtimeCallExample?.delete" :description="t('empty.examples')" :image-size="52" />
             </el-card>
             <div class="runtime-panels">
               <el-card shadow="never">
@@ -1091,7 +1141,7 @@ function t(key: TranslationKey, params?: TranslationParams) {
       <h3>{{ t("panel.initShellLog") }}</h3>
       <el-alert v-if="initShellLog && !initShellLog.enabled" class="form-tip" :title="t('runtime.initLogDisabled')" type="info" :closable="false" />
       <el-empty v-else-if="initShellLog && initShellLog.status === 'waiting'" :description="t('runtime.initLogWaiting')" :image-size="52" />
-      <pre v-else-if="initShellLog?.content" class="muted">{{ initShellLog.content }}</pre>
+      <el-alert v-else-if="initShellLog?.content" class="form-tip" :title="t('runtime.selectEventOutput')" type="success" :closable="false" />
       <el-empty v-else :description="t('empty.initShellLog')" :image-size="52" />
       <el-divider />
       <el-empty v-if="runEvents.length === 0" :description="t('empty.runEvents')" :image-size="52" />

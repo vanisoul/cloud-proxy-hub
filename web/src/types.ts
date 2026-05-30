@@ -164,7 +164,7 @@ export type RuntimeActionExample = {
 
 export type InitShellLogResponse = {
   enabled: boolean;
-  status: "disabled" | "waiting" | "received";
+  status: "disabled" | "waiting" | "received" | "completed";
   content: string;
   updatedAt?: string;
   reason?: string;

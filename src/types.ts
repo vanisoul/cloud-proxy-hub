@@ -166,7 +166,7 @@ export type TerraformRunEvent = {
   output?: string;
 };
 
-export type InitShellLogStatus = "disabled" | "waiting" | "received";
+export type InitShellLogStatus = "disabled" | "waiting" | "received" | "completed";
 
 export type InitShellLogResponse = {
   enabled: boolean;

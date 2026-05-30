@@ -800,6 +800,7 @@ describe("PlatformStore", () => {
     const tfvars = await Bun.file(`${testRoot}/data/apis/shell-api/terraform.tfvars.json`).json();
 
     expect(tfvars.user_data).toContain("curl --connect-timeout 2 --max-time 10 -fsS -X POST");
+    expect(tfvars.user_data).toContain("&done=1");
     expect(tfvars.user_data).toContain(`/callbacks/init-shell/shell-api/${run.id}?token=`);
     expect(tfvars.user_data).toContain('mktemp -d "${TMPDIR:-/tmp}/terraform-platform-init.XXXXXX"');
     expect(tfvars.user_data).toContain('trap \'rm -rf "$__terraform_platform_init_dir"\' EXIT HUP INT TERM');
@@ -876,6 +877,45 @@ describe("PlatformStore", () => {
 
     expect(initLog).toMatchObject({ status: "received", content: "init ok" });
     expect(events.filter((event) => event.type === "init_shell_output")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "init_shell_output").every((event) => event.output === undefined)).toBe(true);
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
+  });
+
+  it("marks init shell log complete without adding an empty output event", async () => {
+    const terraform = await createRuntimeFixture();
+    const run = await terraform.deploy(await store.getApi("shell-api"), {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
+    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 1, content: "first\n" });
+    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 2, content: "", completed: true });
+    const initLog = await store.getInitShellLog("shell-api", run.id);
+    const events = await store.listRunEvents("shell-api", run.id);
+
+    expect(initLog).toMatchObject({ status: "completed", content: "first\n" });
+    expect(events.filter((event) => event.type === "init_shell_output")).toHaveLength(1);
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
+  });
+
+  it("does not expose corrupted init shell event output when utf8 splits across callback chunks", async () => {
+    const terraform = await createRuntimeFixture();
+    const run = await terraform.deploy(await store.getApi("shell-api"), {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
+    const bytes = new TextEncoder().encode("你");
+    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 1, content: bytes.slice(0, 1) });
+    const partialLog = await store.getInitShellLog("shell-api", run.id);
+    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 2, content: bytes.slice(1), completed: true });
+    const initLog = await store.getInitShellLog("shell-api", run.id);
+    const events = await store.listRunEvents("shell-api", run.id);
+
+    expect(partialLog).toMatchObject({ status: "received", content: "" });
+    expect(partialLog.content).not.toContain("�");
+    expect(initLog).toMatchObject({ status: "completed", content: "你" });
+    expect(events.filter((event) => event.type === "init_shell_output")).toHaveLength(2);
+    expect(JSON.stringify(events)).not.toContain("�");
+    expect(events.filter((event) => event.type === "init_shell_output").every((event) => event.output === undefined)).toBe(true);
     Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
   });
 

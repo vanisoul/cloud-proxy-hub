@@ -21,6 +21,7 @@ const idSchema = t.String({ minLength: 1, pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]*$"
 const stringRecord = t.Record(t.String(), t.String());
 const sessionCookieName = "terraform_platform_session";
 const sessionCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
+const runEventsTerminalGraceMs = 10_000;
 
 const keySchema = t.Object({
   id: t.Optional(idSchema),
@@ -610,8 +611,12 @@ async function handleInitShellCallback(apiId: string, runId: string, request: Re
   }
   const token = new URL(request.url).searchParams.get("token") ?? "";
   const sequence = initShellCallbackSequence(request.url);
+  const completed = initShellCallbackCompleted(request.url);
   if (sequence === undefined) {
     return new Response("Invalid sequence", { status: 400 });
+  }
+  if (completed === undefined) {
+    return new Response("Invalid completion flag", { status: 400 });
   }
   const claims = await verifyInitShellCallbackToken(token, apiId, runId);
   if (!claims) {
@@ -626,6 +631,7 @@ async function handleInitShellCallback(apiId: string, runId: string, request: Re
       nonce: claims.nonce,
       sequence,
       content: bytes,
+      completed,
     });
   } catch (error) {
     if (error instanceof Error && error.message.includes("already used")) {
@@ -639,6 +645,14 @@ async function handleInitShellCallback(apiId: string, runId: string, request: Re
   return { ok: true };
 }
 
+function initShellCallbackCompleted(url: string) {
+  const value = new URL(url).searchParams.get("done");
+  if (value === null) {
+    return false;
+  }
+  return value === "1" ? true : undefined;
+}
+
 function initShellCallbackSequence(url: string) {
   const value = new URL(url).searchParams.get("seq") ?? "1";
   if (!/^[1-9]\d*$/.test(value)) {
@@ -648,12 +662,21 @@ function initShellCallbackSequence(url: string) {
   return Number.isSafeInteger(sequence) ? sequence : undefined;
 }
 
-async function shouldCloseRunEventsStream(apiId: string, runId: string, events: Array<{ type: string }>) {
-  if (!events.some((event) => event.type === "succeeded" || event.type === "failed")) {
+async function shouldCloseRunEventsStream(apiId: string, runId: string, events: Array<{ type: string; createdAt?: string }>) {
+  const terminalEvents = events.filter((event) => event.type === "succeeded" || event.type === "failed");
+  if (terminalEvents.length === 0) {
     return false;
   }
   const initLog = await store.getInitShellLog(apiId, runId);
-  return !initLog.enabled || initLog.status !== "waiting";
+  if (initLog.enabled && initLog.status !== "completed") {
+    return false;
+  }
+  const terminalOrInitEvents = events.filter(
+    (event) => event.type === "succeeded" || event.type === "failed" || event.type === "init_shell_output",
+  );
+  const latestActivityTimestamp = Date.parse(terminalOrInitEvents.at(-1)?.createdAt ?? "");
+  const latestActivityAgeMs = Date.now() - (Number.isFinite(latestActivityTimestamp) ? latestActivityTimestamp : Date.now());
+  return latestActivityAgeMs >= runEventsTerminalGraceMs;
 }
 
 function formatSseEvent(id: string, eventName: string, data: unknown) {

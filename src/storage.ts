@@ -315,7 +315,7 @@ export class PlatformStore {
     }
   }
 
-  async appendInitShellLog(apiId: string, runId: string, input: { nonce: string; sequence: number; content: string | Uint8Array }) {
+  async appendInitShellLog(apiId: string, runId: string, input: { nonce: string; sequence: number; content: string | Uint8Array; completed?: boolean }) {
     const run = await this.getRun(apiId, runId);
     if (!run.shellId) {
       throw new Error(`Run ${runId} has no init shell`);
@@ -335,12 +335,19 @@ export class PlatformStore {
     }
     const logPath = this.runPath(apiId, runId, "init-shell.redacted.log");
     await mkdir(dirname(logPath), { recursive: true });
-    await appendFile(logPath, input.content, { mode: 0o600 });
-    await this.appendRunEvent(apiId, runId, {
-      type: "init_shell_output",
-      message: "init shell log received",
-      output: typeof input.content === "string" ? input.content : new TextDecoder().decode(input.content),
-    });
+    const contentLength = typeof input.content === "string" ? input.content.length : input.content.byteLength;
+    if (contentLength > 0) {
+      await appendFile(logPath, input.content, { mode: 0o600 });
+      await this.appendRunEvent(apiId, runId, {
+        type: "init_shell_output",
+        message: "init shell log received",
+      });
+    } else if (input.completed && !(await Bun.file(logPath).exists())) {
+      await writeFile(logPath, "", { flag: "wx", mode: 0o600 });
+    }
+    if (input.completed) {
+      await this.writeJson(this.runPath(apiId, runId, "init-shell.completed.json"), { completedAt: new Date().toISOString() });
+    }
   }
 
   async getInitShellLog(apiId: string, runId: string): Promise<InitShellLogResponse> {
@@ -352,11 +359,13 @@ export class PlatformStore {
       return { enabled: false, status: "disabled", content: "", reason: "PUBLIC_CALLBACK_BASE_URL is not configured" };
     }
     const logPath = this.runPath(apiId, runId, "init-shell.redacted.log");
-    if (!(await Bun.file(logPath).exists())) {
+    const completed = await Bun.file(this.runPath(apiId, runId, "init-shell.completed.json")).exists();
+    const hasLog = await Bun.file(logPath).exists();
+    if (!hasLog && !completed) {
       return { enabled: true, status: "waiting", content: "" };
     }
-    const content = await readFile(logPath, "utf8");
-    return { enabled: true, status: "received", content, updatedAt: new Date().toISOString() };
+    const content = hasLog ? decodeInitShellLog(await readFile(logPath), completed) : "";
+    return { enabled: true, status: completed ? "completed" : "received", content, updatedAt: new Date().toISOString() };
   }
 
   async listRuns(apiId: string): Promise<TerraformRun[]> {
@@ -655,6 +664,10 @@ function sanitizeApiVars(template: TerraformTemplate, vars: Record<string, strin
 
 function isBlank(value: string | undefined) {
   return value === undefined || value.trim() === "";
+}
+
+function decodeInitShellLog(content: Uint8Array, completed: boolean) {
+  return new TextDecoder().decode(content, { stream: !completed });
 }
 
 function redactApiVars(template: TerraformTemplate, vars: Record<string, string>) {
