@@ -1,50 +1,41 @@
-# docker build 範例
-# docker build . --build-arg VERSION=1.0.0 -t cloud-proxy-hub:1.0.0
-
-# docker compose 範例
-# docker compose up -d
-
-# 使用 ARG 將 Project VERSION 設置為預設值
 ARG VERSION=0.0.0
+FROM node:24.15.0-bookworm-slim AS builder
 
-# 使用 Node.js 18.17.1 作為基礎映像檔
-FROM node:24.15.0-trixie-slim
-# 將 ARG 的版本抓進 image 中
+ENV PATH="/root/.bun/bin:${PATH}"
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y curl unzip && \
+    curl -fsSL https://bun.sh/install | bash && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY . .
+RUN bun run build
+
+FROM node:24.15.0-bookworm-slim
 ARG VERSION
 ENV VERSION=${VERSION}
 
-# 安裝 curl
-RUN apt-get update && apt-get install -y curl unzip
+RUN apt-get update && apt-get install -y curl unzip gnupg && \
+    curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com bookworm main" > /etc/apt/sources.list.d/hashicorp.list && \
+    apt-get update && apt-get install -y terraform && \
+    curl -fsSL https://bun.sh/install | bash && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 安裝 bun cli
-RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
-
-# 清除相關暫存
-RUN apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# 設置工作目錄
 WORKDIR /app
 
-# 建立暫存資料夾
-RUN mkdir -p /tmp/aliyundb/
+RUN mkdir -p /app/config /app/data
 
-# 複製 package.json 和 bun.lock 進入容器
-COPY package.json bun.lock .
-
-# 安裝專案相依套件
+COPY package.json bun.lock ./
 RUN bun install --production --frozen-lockfile
 
-# 將 Prisma schema 複製到容器中
-COPY prisma ./prisma
-
-# 生成 Prisma 客戶端
-RUN bun prisma generate
-
-# 將專案代碼複製到容器中
-COPY . .
+COPY src ./src
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
+COPY --from=builder /app/web/dist ./web/dist
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-
-# 在容器啟動時運行 `bun start` 命令
 CMD ["bun", "run", "start"]
