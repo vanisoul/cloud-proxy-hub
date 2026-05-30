@@ -713,7 +713,9 @@ function isCrossOriginUiMutation(path: string, request: Request) {
   }
 
   const origin = request.headers.get("origin");
-  return origin !== null && origin !== new URL(request.url).origin;
+  const requestUrl = new URL(request.url);
+  logger.warn("檢查跨來源 UI 請求", { path, method: request.method, origin, requestOrigin: requestUrl.origin });
+  return origin !== null && origin !== requestUrl.origin;
 }
 
 async function hasValidSessionCookie(request: Request) {
