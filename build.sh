@@ -2,8 +2,13 @@
 set -euo pipefail
 
 IMAGE_REPO="${IMAGE_REPO:-terraform-platform}"
+IMAGE_NAME="${IMAGE_NAME:-terraform-platform}"
+IMAGE_FULL_NAME="${IMAGE_REPO}/${IMAGE_NAME}"
 VERSION="${1:-latest}"
 
-docker build -t "${IMAGE_REPO}:${VERSION}" -t "${IMAGE_REPO}:latest" .
+docker build \
+ --platform linux/amd64 \
+ -t "${IMAGE_FULL_NAME}:${VERSION}" \
+ -t "${IMAGE_FULL_NAME}:latest" .
 
-echo "Built ${IMAGE_REPO}:${VERSION}"
+echo "docker push ${IMAGE_FULL_NAME}:${VERSION}"
