@@ -33,6 +33,7 @@ RUN mkdir -p /app/config /app/data
 COPY package.json bun.lock ./
 RUN bun install --production --frozen-lockfile
 
+COPY tsconfig.json ./tsconfig.json
 COPY src ./src
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 COPY --from=builder /app/web/dist ./web/dist
