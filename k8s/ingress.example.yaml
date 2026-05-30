@@ -5,13 +5,9 @@ metadata:
   labels:
     app.kubernetes.io/name: terraform-platform
   annotations:
-    # Public HTTP paths for browser/API access:
-    # - / redirects unauthenticated users to /login
-    # - /login and /assets/* are unauthenticated UI entry paths
-    # - /ui/* uses the signed admin session cookie
-    # - /api/* requires Authorization: Bearer <ADMIN_API_KEY>
-    # - /callbacks/init-shell/* accepts signed one-time init-shell log callbacks
-    # Do not expose filesystem paths such as /app/config, /app/data, /config, or /data.
+    # Public path requirement: /callbacks/init-shell/* must be reachable by deployed VMs when init-shell logs are enabled.
+    # Security-first default: keep admin UI/API paths (/, /login, /assets/*, /ui/*, /api/*) private or internal-only.
+    # Never expose filesystem paths such as /app/config, /app/data, /config, or /data.
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-body-size: "2m"
 spec:
@@ -24,7 +20,7 @@ spec:
     - host: terraform-platform.example.com
       http:
         paths:
-          - path: /
+          - path: /callbacks/init-shell
             pathType: Prefix
             backend:
               service:
