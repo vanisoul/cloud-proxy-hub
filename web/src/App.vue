@@ -53,7 +53,7 @@ type ApiForm = {
   keyId: string;
   templateId: string;
   shellId: string;
-  varsJson: string;
+  vars: Record<string, string>;
   allowedActions: DeploymentAction[];
 };
 
@@ -122,7 +122,7 @@ const apiForm = reactive<ApiForm>({
   keyId: "",
   templateId: "",
   shellId: "",
-  varsJson: "{}",
+  vars: {},
   allowedActions: [],
 });
 
@@ -428,13 +428,26 @@ function openApiDialog(api?: ApiPublication) {
   apiForm.keyId = api?.keyId ?? providerKeys.value[0]?.id ?? "";
   apiForm.templateId = api?.templateId ?? providerTemplates.value[0]?.id ?? "";
   apiForm.shellId = api?.shellId ?? "";
-  apiForm.varsJson = JSON.stringify(api?.vars ?? apiDefaultVars(), null, 2);
+  resetApiVars(api?.vars);
   apiForm.allowedActions = [...(api?.allowedActions ?? provider?.supportedActions ?? [])];
   apiDialogVisible.value = true;
 }
 
 function apiTemplateChanged() {
-  apiForm.varsJson = JSON.stringify(apiDefaultVars(), null, 2);
+  resetApiVars();
+}
+
+function resetApiVars(vars: Record<string, string> = {}) {
+  apiForm.vars = { ...apiDefaultVars(), ...vars };
+}
+
+function buildApiVars() {
+  return Object.fromEntries(
+    (selectedApiTemplate.value?.variables ?? []).map((variable) => [
+      variable.name,
+      apiForm.vars[variable.name] ?? variable.defaultValue ?? "",
+    ]),
+  );
 }
 
 async function saveApi() {
@@ -451,7 +464,7 @@ async function saveApi() {
           shellId: apiForm.shellId,
         }
       : undefined;
-    const vars = parseStringRecord(apiForm.varsJson, t("form.varsJson"));
+    const vars = buildApiVars();
     await requestJson<ApiPublication>(path, {
       method: "POST",
       body: JSON.stringify({
@@ -1035,7 +1048,23 @@ function t(key: TranslationKey, params?: TranslationParams) {
       <el-form-item :label="t('form.name')" required><el-input v-model="apiForm.name" /></el-form-item>
       <el-form-item :label="t('form.key')" required><el-select v-model="apiForm.keyId"><el-option v-for="key in providerKeys" :key="key.id" :label="`${key.name} (${key.id})`" :value="key.id" /></el-select></el-form-item>
       <el-form-item :label="t('form.template')" required><el-select v-model="apiForm.templateId" @change="apiTemplateChanged"><el-option v-for="template in providerTemplates" :key="template.id" :label="`${template.name} (${template.id})`" :value="template.id" /></el-select></el-form-item>
-      <el-form-item :label="t('form.varsJson')"><el-input v-model="apiForm.varsJson" type="textarea" :rows="6" spellcheck="false" /></el-form-item>
+      <el-form-item :label="t('form.vars')">
+        <el-space direction="vertical" alignment="stretch" fill>
+          <el-form-item
+            v-for="variable in selectedApiTemplate?.variables ?? []"
+            :key="variable.name"
+            :label="`${variable.name} · ${variable.required ? t('form.requiredVariable') : t('form.optionalVariable')}`"
+            :required="variable.required"
+          >
+            <el-input
+              v-model="apiForm.vars[variable.name]"
+              :type="variable.sensitive ? 'password' : 'text'"
+              autocomplete="off"
+              :show-password="variable.sensitive"
+            />
+          </el-form-item>
+        </el-space>
+      </el-form-item>
       <el-form-item :label="t('form.shell')"><el-select v-model="apiForm.shellId" clearable><el-option v-for="shell in providerShells" :key="shell.id" :label="`${shell.name} (${shell.id})`" :value="shell.id" /></el-select></el-form-item>
       <div v-if="apiForm.shellId">
         <el-alert class="form-tip" :title="t('dialog.shellBindingTip')" type="info" show-icon :closable="false" />
