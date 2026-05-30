@@ -131,6 +131,7 @@ export type TerraformRunEventType =
   | "command_started"
   | "command_output"
   | "command_finished"
+  | "init_shell_output"
   | "succeeded"
   | "failed";
 
@@ -158,6 +159,14 @@ export type RuntimeActionExample = {
   path: string;
   body: { vars: Record<string, string> };
   curl: string;
+};
+
+export type InitShellLogResponse = {
+  enabled: boolean;
+  status: "disabled" | "waiting" | "received";
+  content: string;
+  updatedAt?: string;
+  reason?: string;
 };
 
 export type BootstrapResponse = {

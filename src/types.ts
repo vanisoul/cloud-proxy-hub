@@ -149,6 +149,7 @@ export type TerraformRunEventType =
   | "command_started"
   | "command_output"
   | "command_finished"
+  | "init_shell_output"
   | "succeeded"
   | "failed";
 
@@ -162,6 +163,16 @@ export type TerraformRunEvent = {
   exitCode?: number;
   message?: string;
   output?: string;
+};
+
+export type InitShellLogStatus = "disabled" | "waiting" | "received";
+
+export type InitShellLogResponse = {
+  enabled: boolean;
+  status: InitShellLogStatus;
+  content: string;
+  updatedAt?: string;
+  reason?: string;
 };
 
 export type RuntimeCallExample = {

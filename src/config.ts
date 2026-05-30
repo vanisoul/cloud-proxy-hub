@@ -6,6 +6,9 @@ export const appConfig = {
   dataDir: Bun.env.DATA_DIR ?? "./data",
   apiKey: Bun.env.ADMIN_API_KEY ?? "",
   terraformBin: Bun.env.TERRAFORM_BIN ?? "terraform",
+  get publicCallbackBaseUrl() {
+    return Bun.env.PUBLIC_CALLBACK_BASE_URL?.trim() || "";
+  },
 };
 
 export const builtInProviderTypes: ProviderType[] = [

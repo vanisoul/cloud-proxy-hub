@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
 
 import { appConfig } from "@/config";
+import { initShellCallbackMaxBytes, verifyInitShellCallbackToken } from "@/init-shell-callback";
 import { createLogger, redact } from "@/logger";
 import { PlatformStore } from "@/storage";
 import { TerraformService } from "@/terraform";
@@ -72,6 +73,10 @@ const runSchema = t.Object({
 const app = new Elysia()
   .onBeforeHandle(async ({ headers, path, request }) => {
     if (path.startsWith("/assets") || path === "/login") {
+      return;
+    }
+
+    if (path.startsWith("/callbacks/init-shell/")) {
       return;
     }
 
@@ -297,6 +302,9 @@ const app = new Elysia()
     async ({ params, request }) => runEventsStream(params.apiId, params.runId, request),
     { params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }) },
   )
+  .get("/ui/deployments/:apiId/runs/:runId/init-log", async ({ params }) => store.getInitShellLog(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
   .get("/ui/deployments/:apiId/runs/:runId/events", async ({ params }) => store.listRunEvents(params.apiId, params.runId), {
     params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
   })
@@ -450,9 +458,17 @@ const app = new Elysia()
   .get("/api/deployments/:apiId/runs/:runId/events", async ({ params }) => store.listRunEvents(params.apiId, params.runId), {
     params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
   })
+  .get("/api/deployments/:apiId/runs/:runId/init-log", async ({ params }) => store.getInitShellLog(params.apiId, params.runId), {
+    params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
+  })
   .get("/api/deployments/:apiId/runs/:runId", async ({ params }) => store.getRun(params.apiId, params.runId), {
     params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }),
   })
+  .post(
+    "/callbacks/init-shell/:apiId/:runId",
+    async ({ params, request }) => handleInitShellCallback(params.apiId, params.runId, request),
+    { params: t.Object({ apiId: idSchema, runId: t.String({ minLength: 1 }) }) },
+  )
   .listen(appConfig.port);
 
 logger.info(
@@ -548,7 +564,7 @@ async function runEventsStream(apiId: string, runId: string, request: Request) {
         }
         sentCount = events.length;
 
-        if (pendingEvents.some((event) => event.type === "succeeded" || event.type === "failed")) {
+        if (await shouldCloseRunEventsStream(apiId, runId, events)) {
           close();
         }
       };
@@ -585,6 +601,49 @@ async function runEventsStream(apiId: string, runId: string, request: Request) {
       connection: "keep-alive",
     },
   });
+}
+
+async function handleInitShellCallback(apiId: string, runId: string, request: Request) {
+  const contentLengthHeader = request.headers.get("content-length") ?? "";
+  if (!/^\d+$/.test(contentLengthHeader)) {
+    return new Response("Length required", { status: 411 });
+  }
+  const contentLength = Number(contentLengthHeader);
+  if (contentLength > initShellCallbackMaxBytes) {
+    return new Response("Payload too large", { status: 413 });
+  }
+  const token = new URL(request.url).searchParams.get("token") ?? "";
+  const claims = await verifyInitShellCallbackToken(token, apiId, runId);
+  if (!claims) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength > initShellCallbackMaxBytes) {
+    return new Response("Payload too large", { status: 413 });
+  }
+  try {
+    await store.appendInitShellLog(apiId, runId, {
+      nonce: claims.nonce,
+      content: new TextDecoder().decode(bytes),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("already used")) {
+      return new Response("Conflict", { status: 409 });
+    }
+    if (error instanceof Error && error.message.includes("has no init shell")) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    throw error;
+  }
+  return { ok: true };
+}
+
+async function shouldCloseRunEventsStream(apiId: string, runId: string, events: Array<{ type: string }>) {
+  if (!events.some((event) => event.type === "succeeded" || event.type === "failed")) {
+    return false;
+  }
+  const initLog = await store.getInitShellLog(apiId, runId);
+  return !initLog.enabled || initLog.status !== "waiting";
 }
 
 function formatSseEvent(id: string, eventName: string, data: unknown) {
@@ -749,7 +808,7 @@ function isClientInputError(message: string) {
 }
 
 function isNotFoundError(message: string) {
-  return message.startsWith("API ") && message.endsWith("not found");
+  return (message.startsWith("API ") || message.startsWith("Run ")) && message.endsWith("not found");
 }
 
 export type App = typeof app;

@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 import { appConfig } from "@/config";
 import { uuidV7 } from "@/id";
+import { createInitShellCallbackUrl } from "@/init-shell-callback";
 import { PlatformStore } from "@/storage";
 import { normalizeTemplateFiles } from "@/template";
 import type {
@@ -115,7 +116,9 @@ export class TerraformService {
 
     try {
       const template = api.snapshot.template;
-      const varsWithShell = injectShellStartupVars(api, input.vars);
+      const runId = uuidV7();
+      const callbackUrl = await createInitShellCallbackUrl(api.id, runId);
+      const varsWithShell = injectShellStartupVars(api, input.vars, callbackUrl);
       const missing = template.variables.filter(
         (variable) => variable.required && varsWithShell[variable.name] === undefined,
       );
@@ -126,12 +129,14 @@ export class TerraformService {
       const sensitiveVarNames = new Set(template.variables
         .filter((variable) => variable.sensitive)
         .map((variable) => variable.name));
+      if (callbackUrl && api.snapshot.shell) {
+        sensitiveVarNames.add(api.snapshot.shell.startupVariable);
+      }
       const executionVars = sanitizeVars(
         template.variables.map((variable) => variable.name),
         varsWithShell,
       );
       const sortedSensitiveVarNames = [...sensitiveVarNames].sort();
-      const runId = uuidV7();
       const run: TerraformRun = {
         id: runId,
         apiId: api.id,
@@ -186,7 +191,7 @@ export class TerraformService {
     const providerType = await this.store.getProviderType(api.providerTypeId);
     const key = await this.store.getKey(api.providerTypeId, api.keyId);
     const workDir = this.store.terraformPath(run.apiId);
-    const secrets = [...Object.values(key.env), ...Object.values(executionVars)];
+    const secrets = [...Object.values(key.env), ...Object.values(executionVars), ...callbackSecretsFromVars(executionVars)];
     const runningRun: TerraformRun = { ...run, status: "running", updatedAt: new Date().toISOString() };
 
     await this.store.saveRun(runningRun);
@@ -513,15 +518,47 @@ function terraformArgs(action: DeploymentAction) {
     : ["destroy", "-input=false", "-no-color", "-auto-approve"];
 }
 
-function injectShellStartupVars(api: ApiPublication, vars: Record<string, string>) {
+function injectShellStartupVars(api: ApiPublication, vars: Record<string, string>, callbackUrl?: string) {
   const shell = api.snapshot.shell;
   if (!shell) {
     return vars;
   }
+  const shellContent = `${shell.inline.join("\n")}\n`;
   return {
     ...vars,
-    [shell.startupVariable]: `${shell.inline.join("\n")}\n`,
+    [shell.startupVariable]: callbackUrl ? initShellCallbackWrapper(shellContent, callbackUrl) : shellContent,
   };
+}
+
+function initShellCallbackWrapper(shellContent: string, callbackUrl: string) {
+  return `#!/usr/bin/env sh
+__terraform_platform_init_log="\${TMPDIR:-/tmp}/terraform-platform-init-$$.log"
+(
+${shellContent}) >"$__terraform_platform_init_log" 2>&1
+__terraform_platform_init_exit=$?
+curl -fsS -X POST ${shellQuote(callbackUrl)} -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_log" >/dev/null 2>&1 || true
+cat "$__terraform_platform_init_log"
+rm -f "$__terraform_platform_init_log"
+exit "$__terraform_platform_init_exit"
+`;
+}
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function callbackSecretsFromVars(vars: Record<string, string>) {
+  const secrets = new Set<string>();
+  for (const value of Object.values(vars)) {
+    for (const match of value.matchAll(/https?:\/\/[^\s']*\/callbacks\/init-shell\/[^\s']*/g)) {
+      secrets.add(match[0]);
+      const token = new URL(match[0]).searchParams.get("token");
+      if (token) {
+        secrets.add(token);
+      }
+    }
+  }
+  return [...secrets];
 }
 
 function redactSecrets(output: string, secrets: string[]) {

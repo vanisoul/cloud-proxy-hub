@@ -41,6 +41,7 @@ See `.env.example` for supported platform variables:
 - `CONFIG_DIR`
 - `DATA_DIR`
 - `TERRAFORM_BIN`
+- `PUBLIC_CALLBACK_BASE_URL` (optional; when empty, Init Shell Log callback is disabled)
 
 ## API Flow
 
@@ -64,3 +65,4 @@ Set `Authorization: Bearer <ADMIN_API_KEY>` for all API routes.
 - Shell resources are platform-managed reusable initialization commands. When a shell is bound while publishing an API, deploy injects the shell commands into a provider-specific startup variable in `terraform.tfvars.json`: Alicloud uses `user_data`; Google uses `startup_script`; other providers may use `user_data`, `startup_script`, or `cloud_init`. Templates remain blocked from defining provisioners.
 - Published APIs store provider type, key ID, template ID, optional shell ID, action metadata, and revision snapshots.
 - Terraform subprocesses receive only minimal runtime env plus the selected key env for that run.
+- Init Shell Log callback is passive and disabled unless `PUBLIC_CALLBACK_BASE_URL` is set to a URL reachable by deployed VMs. When enabled for shell-bound APIs, the generated startup script posts its captured stdout/stderr back to the platform with a short-lived signed callback URL.

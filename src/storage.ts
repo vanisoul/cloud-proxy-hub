@@ -10,6 +10,7 @@ import type {
   ProviderType,
   PublicProviderKey,
   PublicTerraformTemplate,
+  InitShellLogResponse,
   RuntimeCallExample,
   ShellBinding,
   ShellResource,
@@ -244,7 +245,14 @@ export class PlatformStore {
   }
 
   async getRun(apiId: string, runId: string): Promise<TerraformRun> {
-    return this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"));
+    try {
+      return await this.readJson<TerraformRun>(this.runPath(apiId, runId, "run.json"));
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(`Run ${runId} not found`);
+      }
+      throw error;
+    }
   }
 
   async appendRunEvent(apiId: string, runId: string, eventInput: RunEventInput): Promise<TerraformRunEvent> {
@@ -274,6 +282,50 @@ export class PlatformStore {
       }
       throw error;
     }
+  }
+
+  async appendInitShellLog(apiId: string, runId: string, input: { nonce: string; content: string }) {
+    const run = await this.getRun(apiId, runId);
+    if (!run.shellId) {
+      throw new Error(`Run ${runId} has no init shell`);
+    }
+    const noncePath = this.runPath(apiId, runId, "init-shell-nonces", `${input.nonce}.json`);
+    await mkdir(dirname(noncePath), { recursive: true });
+    try {
+      await writeFile(noncePath, `${JSON.stringify({ nonce: input.nonce, createdAt: new Date().toISOString() }, null, 2)}\n`, {
+        flag: "wx",
+        mode: 0o600,
+      });
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+        throw new Error(`Init shell callback nonce ${input.nonce} already used`);
+      }
+      throw error;
+    }
+    const logPath = this.runPath(apiId, runId, "init-shell.redacted.log");
+    await mkdir(dirname(logPath), { recursive: true });
+    await appendFile(logPath, input.content, { mode: 0o600 });
+    await this.appendRunEvent(apiId, runId, {
+      type: "init_shell_output",
+      message: "init shell log received",
+      output: input.content,
+    });
+  }
+
+  async getInitShellLog(apiId: string, runId: string): Promise<InitShellLogResponse> {
+    const run = await this.getRun(apiId, runId);
+    if (!run.shellId) {
+      return { enabled: false, status: "disabled", content: "", reason: "Run has no init shell" };
+    }
+    if (!appConfig.publicCallbackBaseUrl) {
+      return { enabled: false, status: "disabled", content: "", reason: "PUBLIC_CALLBACK_BASE_URL is not configured" };
+    }
+    const logPath = this.runPath(apiId, runId, "init-shell.redacted.log");
+    if (!(await Bun.file(logPath).exists())) {
+      return { enabled: true, status: "waiting", content: "" };
+    }
+    const content = await readFile(logPath, "utf8");
+    return { enabled: true, status: "received", content, updatedAt: new Date().toISOString() };
   }
 
   async listRuns(apiId: string): Promise<TerraformRun[]> {

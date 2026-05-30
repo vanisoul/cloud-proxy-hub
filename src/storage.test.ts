@@ -10,6 +10,7 @@ const { TerraformService } = await import("@/terraform");
 const store = new PlatformStore();
 
 afterEach(async () => {
+  Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
   await store.removeRuntimeData();
   await store.removeConfigData();
 });
@@ -515,6 +516,87 @@ describe("PlatformStore", () => {
     expect(events.some((event) => event.type === "command_output" && event.step === "apply")).toBe(true);
   });
 
+  it("leaves init shell callback disabled when callback base URL is unset", async () => {
+    const terraform = await createRuntimeFixture();
+    const api = await store.getApi("shell-api");
+
+    const run = await terraform.deploy(api, {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const tfvars = await Bun.file(`${testRoot}/data/apis/shell-api/terraform.tfvars.json`).json();
+    const initLog = await store.getInitShellLog("shell-api", run.id);
+
+    expect(tfvars.user_data).toBe("printf 'init shell ok\\n'\n");
+    expect(initLog).toMatchObject({ enabled: false, status: "disabled" });
+  });
+
+  it("wraps init shell with a signed curl callback when callback base URL is set", async () => {
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
+    const terraform = await createRuntimeFixture();
+    const api = await store.getApi("shell-api");
+
+    const run = await terraform.deploy(api, {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const tfvars = await Bun.file(`${testRoot}/data/apis/shell-api/terraform.tfvars.json`).json();
+
+    expect(tfvars.user_data).toContain("curl -fsS -X POST");
+    expect(tfvars.user_data).toContain(`/callbacks/init-shell/shell-api/${run.id}?token=`);
+    expect(tfvars.user_data).toContain("printf 'init shell ok\\n'");
+    expect(JSON.stringify(run)).not.toContain("token=");
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
+  });
+
+  it("redacts signed callback URLs from Terraform output", async () => {
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
+    const terraform = await createRuntimeFixture(undefined, "", "", "", "__TFVARS__");
+    const run = await terraform.deploy(await store.getApi("shell-api"), {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const log = await Bun.file(`${testRoot}/data/apis/shell-api/runs/${run.id}/logs.redacted.txt`).text();
+    const events = await store.listRunEvents("shell-api", run.id);
+
+    expect(log).not.toContain("token=");
+    expect(JSON.stringify(events)).not.toContain("token=");
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
+  });
+
+  it("persists init shell logs with nonce replay protection", async () => {
+    const terraform = await createRuntimeFixture();
+    const run = await terraform.deploy(await store.getApi("shell-api"), {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
+    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", content: "init ok\n" });
+    await expectRejects(
+      store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", content: "replay\n" }),
+      "already used",
+    );
+    const initLog = await store.getInitShellLog("shell-api", run.id);
+    const events = await store.listRunEvents("shell-api", run.id);
+
+    expect(initLog).toMatchObject({ status: "received", content: "init ok\n" });
+    expect(events.at(-1)?.type).toBe("init_shell_output");
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
+  });
+
+  it("keeps init shell logs disabled and rejects callbacks for runs without a shell", async () => {
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
+    const terraform = await createRuntimeFixture();
+    const run = await terraform.deploy(await store.getApi("safe-api"), {
+      vars: { token: "super-secret", name: "demo" },
+    });
+
+    const initLog = await store.getInitShellLog("safe-api", run.id);
+
+    expect(initLog).toMatchObject({ enabled: false, status: "disabled", reason: "Run has no init shell" });
+    await expectRejects(
+      store.appendInitShellLog("safe-api", run.id, { nonce: "nonce-1", content: "should not persist\n" }),
+      "has no init shell",
+    );
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
+  });
+
   it("lets selected shell override caller-provided startup variable values", async () => {
     const terraform = await createRuntimeFixture();
     const api = await store.getApi("shell-api");
@@ -941,6 +1023,10 @@ if [ "\${1:-}" = "${failingCommand ?? ""}" ]; then
 fi
 if [ "\${1:-}" = "${slowCommand}" ]; then
   sleep 1
+fi
+if [ "\${1:-}" = "apply" ] && [ "${applyOutput}" = "__TFVARS__" ]; then
+  cat terraform.tfvars.json
+  exit 0
 fi
 if [ "\${1:-}" = "apply" ] && [ -n "${applyOutput}" ]; then
   printf '%s\\n' '${applyOutput}'

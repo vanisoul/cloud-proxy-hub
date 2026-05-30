@@ -18,6 +18,7 @@ import type {
   ApiPublication,
   BootstrapResponse,
   DeploymentAction,
+  InitShellLogResponse,
   ProviderType,
   PublicProviderKey,
   PublicTerraformTemplate,
@@ -94,6 +95,7 @@ const runtimeApiId = ref("");
 const runList = ref<TerraformRun[] | null>(null);
 const runDetail = ref<TerraformRun | null>(null);
 const runEvents = ref<TerraformRunEvent[]>([]);
+const initShellLog = ref<InitShellLogResponse | null>(null);
 const runtimeRunDialogVisible = ref(false);
 const selectedRunEventId = ref("");
 const currentLocale = ref<LocaleKey>(loadSavedLocale());
@@ -551,7 +553,7 @@ async function viewRun(runId: string) {
       return;
     }
     runtimeRunDialogVisible.value = true;
-    if (runDetail.value?.status === "queued" || runDetail.value?.status === "running") {
+    if (runDetail.value?.status === "queued" || runDetail.value?.status === "running" || initShellLog.value?.status === "waiting") {
       openRunEventsStream(api, runId, seq);
     }
     ElMessage.success(t("message.runDetailLoaded"));
@@ -565,11 +567,13 @@ async function loadRunDetail(api: ApiPublication, runId: string, seq = runtimeRe
     requestJson<TerraformRun>(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}`),
     requestJson<TerraformRunEvent[]>(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events`),
   ]);
+  const loadedInitShellLog = await requestJson<InitShellLogResponse>(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/init-log`);
   if (!isCurrentRuntimeRequest(seq, api)) {
     return false;
   }
   runDetail.value = run;
   runEvents.value = events;
+  initShellLog.value = loadedInitShellLog;
   selectedRunEventId.value = "";
   return true;
 }
@@ -580,7 +584,7 @@ function openRunEventsStream(api: ApiPublication, runId: string, seq = runtimeRe
   const stream = new EventSource(`/ui/deployments/${encodedApiId}/runs/${encodedRunId}/events/stream`);
   runEventsStream = stream;
 
-  for (const eventName of ["queued", "running", "command_started", "command_output", "command_finished", "succeeded", "failed"] as const) {
+  for (const eventName of ["queued", "running", "command_started", "command_output", "command_finished", "init_shell_output", "succeeded", "failed"] as const) {
     stream.addEventListener(eventName, (message) => {
       if (runEventsStream !== stream) {
         return;
@@ -591,6 +595,9 @@ function openRunEventsStream(api: ApiPublication, runId: string, seq = runtimeRe
       }
       const event = JSON.parse((message as MessageEvent<string>).data) as TerraformRunEvent;
       appendRunEvent(event);
+      if (event.type === "init_shell_output") {
+        void finishInitShellStream(api, runId, seq).catch(showError);
+      }
       if (event.type === "succeeded" || event.type === "failed") {
         void finalizeRunStream(api, runId, seq).catch(showError);
       }
@@ -607,6 +614,15 @@ function openRunEventsStream(api: ApiPublication, runId: string, seq = runtimeRe
     }
     void refreshTerminalRunAfterStreamError(api, runId, seq).catch(showError);
   };
+}
+
+async function loadInitShellLog(api: ApiPublication, runId: string, seq = runtimeRequestSeq) {
+  const result = await requestJson<InitShellLogResponse>(
+    `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}/init-log`,
+  );
+  if (isCurrentRuntimeRequest(seq, api)) {
+    initShellLog.value = result;
+  }
 }
 
 function appendRunEvent(event: TerraformRunEvent) {
@@ -631,30 +647,49 @@ function isRunStatusEvent(
 }
 
 async function refreshTerminalRunAfterStreamError(api: ApiPublication, runId: string, seq = runtimeRequestSeq) {
-  const run = await requestJson<TerraformRun>(
-    `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`,
-  );
+  const [run, loadedInitShellLog] = await Promise.all([
+    requestJson<TerraformRun>(`/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`),
+    requestJson<InitShellLogResponse>(`/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}/init-log`),
+  ]);
   if (!isCurrentRuntimeRequest(seq, api)) {
     return;
   }
+  initShellLog.value = loadedInitShellLog;
   if (run.status === "succeeded" || run.status === "failed" || run.status === "needs_attention") {
     runDetail.value = run;
-    closeRunEventsStream();
+    if (loadedInitShellLog.status !== "waiting") {
+      closeRunEventsStream();
+    }
     await loadRuns(api, false, seq);
   }
 }
 
 async function finalizeRunStream(api: ApiPublication, runId: string, seq = runtimeRequestSeq) {
-  closeRunEventsStream();
-  const run = await requestJson<TerraformRun>(
-    `/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`,
-  );
+  const [run, loadedInitShellLog] = await Promise.all([
+    requestJson<TerraformRun>(`/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}`),
+    requestJson<InitShellLogResponse>(`/ui/deployments/${encodeURIComponent(api.id)}/runs/${encodeURIComponent(runId)}/init-log`),
+  ]);
   if (!isCurrentRuntimeRequest(seq, api)) {
     return;
   }
   runDetail.value = run;
+  initShellLog.value = loadedInitShellLog;
   await loadRuns(api, false, seq);
+  if (loadedInitShellLog.status === "waiting") {
+    return;
+  }
+  closeRunEventsStream();
   ElMessage.success(t("message.runtimeFinished", { action: run.action, status: run.status }));
+}
+
+async function finishInitShellStream(api: ApiPublication, runId: string, seq = runtimeRequestSeq) {
+  await loadInitShellLog(api, runId, seq);
+  if (!isCurrentRuntimeRequest(seq, api)) {
+    return;
+  }
+  if (runDetail.value?.status === "succeeded" || runDetail.value?.status === "failed") {
+    closeRunEventsStream();
+  }
 }
 
 function closeRunEventsStream() {
@@ -672,6 +707,7 @@ function resetRuntimePanels() {
   runList.value = null;
   runDetail.value = null;
   runEvents.value = [];
+  initShellLog.value = null;
   selectedRunEventId.value = "";
   runtimeRunDialogVisible.value = false;
 }
@@ -999,6 +1035,12 @@ function t(key: TranslationKey, params?: TranslationParams) {
         <el-descriptions-item :label="t('table.created')">{{ formatDate(runDetail.createdAt) }}</el-descriptions-item>
         <el-descriptions-item :label="t('runtime.workdir')" :span="2">{{ runDetail.workdir ?? selectedRuntimeApi?.id }}</el-descriptions-item>
       </el-descriptions>
+      <el-divider />
+      <h3>{{ t("panel.initShellLog") }}</h3>
+      <el-alert v-if="initShellLog && !initShellLog.enabled" class="form-tip" :title="t('runtime.initLogDisabled')" type="info" :closable="false" />
+      <el-empty v-else-if="initShellLog && initShellLog.status === 'waiting'" :description="t('runtime.initLogWaiting')" :image-size="52" />
+      <pre v-else-if="initShellLog?.content" class="muted">{{ initShellLog.content }}</pre>
+      <el-empty v-else :description="t('empty.initShellLog')" :image-size="52" />
       <el-divider />
       <el-empty v-if="runEvents.length === 0" :description="t('empty.runEvents')" :image-size="52" />
       <el-table v-else :data="runEventDisplayRows" :empty-text="t('empty.runEvents')" stripe highlight-current-row>

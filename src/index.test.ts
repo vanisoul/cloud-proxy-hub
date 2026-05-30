@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { appendFile } from "node:fs/promises";
 
 const spawnedProcesses: Bun.Subprocess[] = [];
 
@@ -203,6 +204,23 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(storage).toContain('events.redacted.ndjson');
   });
 
+  it("defines init shell log callback routes and UI section", async () => {
+    const app = await Bun.file("web/src/App.vue").text();
+    const server = await Bun.file("src/index.ts").text();
+    const types = await Bun.file("web/src/types.ts").text();
+
+    expect(server).toContain('"/callbacks/init-shell/:apiId/:runId"');
+    expect(server).toContain('"/ui/deployments/:apiId/runs/:runId/init-log"');
+    expect(server).toContain('"/api/deployments/:apiId/runs/:runId/init-log"');
+    expect(server).toContain("shouldCloseRunEventsStream");
+    expect(server).toContain("shouldCloseRunEventsStream(apiId, runId, events)");
+    expect(app).toContain('t("panel.initShellLog")');
+    expect(app).toContain('initShellLog?.content');
+    expect(app).toContain('initShellLog.value?.status === "waiting"');
+    expect(app).toContain("finishInitShellStream");
+    expect(types).toContain('export type InitShellLogResponse');
+  });
+
   it("keeps API deploy routes synchronous while adding UI async start routes", async () => {
     const server = await Bun.file("src/index.ts").text();
 
@@ -267,32 +285,177 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(uiBootstrap.status).toBe(200);
     expect(crossOriginMutation.status).toBe(403);
   });
+
+  it("reports init shell log disabled when callback base URL is unset", async () => {
+    const server = await startTestServer();
+    const cookie = await login(server.origin);
+    const response = await fetch(`${server.origin}/ui/deployments/safe-api/runs/run-1/init-log`, { headers: { cookie } });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ enabled: false, status: "disabled" });
+  });
+
+  it("reports init shell log disabled for runs without a shell", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const cookie = await login(server.origin);
+    const response = await fetch(`${server.origin}/ui/deployments/no-shell-api/runs/run-no-shell/init-log`, { headers: { cookie } });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ enabled: false, status: "disabled", reason: "Run has no init shell" });
+  });
+
+  it("does not report init shell state for unknown runs", async () => {
+    const server = await startTestServer();
+    const cookie = await login(server.origin);
+    const response = await fetch(`${server.origin}/ui/deployments/safe-api/runs/missing-run/init-log`, { headers: { cookie } });
+
+    expect(response.status).toBe(404);
+  });
+
+  it("accepts signed init shell callback logs and rejects replay", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const token = await createTestCallbackToken("safe-api", "run-1", 60_000);
+    const callbackUrl = `${server.origin}/callbacks/init-shell/safe-api/run-1?token=${encodeURIComponent(token)}`;
+
+    const accepted = await fetch(callbackUrl, { method: "POST", body: "init shell ok\n" });
+    const replay = await fetch(callbackUrl, { method: "POST", body: "duplicate\n" });
+    const logResponse = await fetch(`${server.origin}/api/deployments/safe-api/runs/run-1/init-log`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const log = await logResponse.json();
+
+    expect(accepted.status).toBe(200);
+    expect(replay.status).toBe(409);
+    expect(log).toMatchObject({ enabled: true, status: "received", content: "init shell ok\n" });
+  });
+
+  it("rejects signed init shell callbacks for runs without a shell", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const token = await createTestCallbackToken("no-shell-api", "run-no-shell", 60_000);
+    const response = await fetch(`${server.origin}/callbacks/init-shell/no-shell-api/run-no-shell?token=${encodeURIComponent(token)}`, {
+      method: "POST",
+      body: "should not persist\n",
+    });
+
+    expect(response.status).toBe(403);
+  });
+
+  it("accepts init shell logs posted with the generated wrapper callback URL through curl", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "__self__" });
+    const deployResponse = await fetch(`${server.origin}/api/deployments/safe-api/deploy`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-admin-key", "content-type": "application/json" },
+      body: JSON.stringify({ vars: { name: "demo", token: "super-secret" } }),
+    });
+    const run = await deployResponse.json();
+    const tfvars = await Bun.file(`${server.testRoot}/data/apis/safe-api/terraform.tfvars.json`).json();
+    const callbackUrl = String(tfvars.user_data).match(/curl -fsS -X POST '([^']+)'/)?.[1];
+    const payloadPath = `${server.testRoot}/init-shell.log`;
+
+    if (!callbackUrl) {
+      throw new Error("Expected generated callback URL in startup script");
+    }
+
+    await Bun.write(payloadPath, "generated wrapper ok\n");
+    const accepted = await Bun.spawn(["curl", "-fsS", "-X", "POST", callbackUrl, "-H", "Content-Type: text/plain", "--data-binary", `@${payloadPath}`]).exited;
+    const replay = Bun.spawn(["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", callbackUrl, "--data-binary", `@${payloadPath}`], {
+      stdout: "pipe",
+    });
+    const replayStatus = await new Response(replay.stdout).text();
+    await replay.exited;
+    const logResponse = await fetch(`${server.origin}/api/deployments/safe-api/runs/${run.id}/init-log`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const log = await logResponse.json();
+
+    expect(deployResponse.status).toBe(200);
+    expect(run.shellId).toBe("init-shell");
+    expect(accepted).toBe(0);
+    expect(replayStatus).toBe("409");
+    expect(log).toMatchObject({ enabled: true, status: "received", content: "generated wrapper ok\n" });
+  });
+
+  it("keeps run event stream open when init shell output arrives before terminal status", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const cookie = await login(server.origin);
+    await writeInitShellLog(server.testRoot, "safe-api", "run-1", "early init\n");
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "init_shell_output");
+    const stream = await openRunEventStream(server.origin, cookie, "safe-api", "run-1");
+
+    const initEvent = await readNextSseEvent(stream);
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "succeeded");
+    const terminalEvent = await readNextSseEvent(stream);
+
+    expect(initEvent.event).toBe("init_shell_output");
+    expect(terminalEvent.event).toBe("succeeded");
+    await stream.reader.cancel();
+  });
+
+  it("keeps run event stream open for late init shell output after terminal status", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const cookie = await login(server.origin);
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "succeeded");
+    const stream = await openRunEventStream(server.origin, cookie, "safe-api", "run-1");
+
+    const terminalEvent = await readNextSseEvent(stream);
+    await writeInitShellLog(server.testRoot, "safe-api", "run-1", "late init\n");
+    await appendFixtureRunEvent(server.testRoot, "safe-api", "run-1", "init_shell_output");
+    const initEvent = await readNextSseEvent(stream);
+
+    expect(terminalEvent.event).toBe("succeeded");
+    expect(initEvent.event).toBe("init_shell_output");
+    await stream.reader.cancel();
+  });
+
+  it("rejects invalid and oversized init shell callbacks", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "http://127.0.0.1:1" });
+    const token = await createTestCallbackToken("safe-api", "run-oversized", 60_000);
+    const invalid = await fetch(`${server.origin}/callbacks/init-shell/safe-api/run-invalid?token=bad`, {
+      method: "POST",
+      body: "bad\n",
+    });
+    const oversized = await fetch(`${server.origin}/callbacks/init-shell/safe-api/run-oversized?token=${encodeURIComponent(token)}`, {
+      method: "POST",
+      body: "x".repeat(65 * 1024),
+    });
+
+    expect(invalid.status).toBe(401);
+    expect(oversized.status).toBe(413);
+  });
 });
 
-async function startTestServer() {
+async function startTestServer(options: { publicCallbackBaseUrl?: string } = {}) {
   const port = 43000 + Math.floor(Math.random() * 1000);
   const testRoot = `/tmp/cloud-proxy-hub-ui-${crypto.randomUUID()}`;
+  const terraformBin = `${testRoot}/terraform.sh`;
+  const origin = `http://127.0.0.1:${port}`;
+  const publicCallbackBaseUrl = options.publicCallbackBaseUrl === "__self__" ? origin : options.publicCallbackBaseUrl ?? "";
+  await Bun.write(terraformBin, "#!/usr/bin/env sh\nprintf 'fake terraform %s ok\\n' \"${1:-}\"\n");
+  await Bun.spawn(["chmod", "+x", terraformBin]).exited;
+  await seedRuntimeFixture(testRoot);
   const process = Bun.spawn(["bun", "run", "src/index.ts"], {
     env: {
       ...Bun.env,
       ADMIN_API_KEY: "test-admin-key",
       CONFIG_DIR: `${testRoot}/config`,
       DATA_DIR: `${testRoot}/data`,
+      TERRAFORM_BIN: terraformBin,
+      PUBLIC_CALLBACK_BASE_URL: publicCallbackBaseUrl,
       PORT: String(port),
     },
     stderr: "pipe",
     stdout: "pipe",
   });
   spawnedProcesses.push(process);
-  const origin = `http://127.0.0.1:${port}`;
-
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
       const response = await fetch(`${origin}/health`, {
         headers: { authorization: "Bearer test-admin-key" },
       });
       if (response.ok) {
-        return { origin };
+        return { origin, testRoot };
       }
     } catch {
       await Bun.sleep(100);
@@ -300,6 +463,215 @@ async function startTestServer() {
   }
 
   throw new Error("Test server did not become ready");
+}
+
+async function seedRuntimeFixture(testRoot: string) {
+  const runDir = `${testRoot}/data/apis/safe-api/runs/run-1`;
+  const noShellRunDir = `${testRoot}/data/apis/no-shell-api/runs/run-no-shell`;
+  await Bun.spawn([
+    "mkdir",
+    "-p",
+    `${testRoot}/config/terraform-providers`,
+    `${testRoot}/config/keys/aliyun-alicloud/key-1`,
+    `${testRoot}/config/templates/aliyun-alicloud/template-1/files`,
+    `${testRoot}/config/shells/aliyun-alicloud/init-shell`,
+    `${testRoot}/config/apis/aliyun-alicloud`,
+    runDir,
+    noShellRunDir,
+  ]).exited;
+  await Bun.write(`${testRoot}/config/terraform-providers/aliyun-alicloud.json`, JSON.stringify({
+    id: "aliyun-alicloud",
+    name: "Aliyun / Alibaba Cloud",
+    sourceAddress: "aliyun/alicloud",
+    versionConstraint: "~> 1.0",
+    requiredEnv: ["ALICLOUD_ACCESS_KEY", "ALICLOUD_SECRET_KEY", "ALICLOUD_REGION"],
+    supportedActions: ["deploy", "delete"],
+    docsUrl: "https://registry.terraform.io/providers/aliyun/alicloud/latest/docs",
+  }));
+  await Bun.write(`${testRoot}/config/keys/aliyun-alicloud/key-1/metadata.json`, JSON.stringify({
+    id: "key-1",
+    providerTypeId: "aliyun-alicloud",
+    name: "Key",
+    envKeys: ["ALICLOUD_ACCESS_KEY", "ALICLOUD_SECRET_KEY", "ALICLOUD_REGION"],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }));
+  await Bun.write(`${testRoot}/config/keys/aliyun-alicloud/key-1/secret.json`, JSON.stringify({
+    env: {
+      ALICLOUD_ACCESS_KEY: "access",
+      ALICLOUD_SECRET_KEY: "secret",
+      ALICLOUD_REGION: "cn-shanghai",
+    },
+  }));
+  await Bun.write(`${testRoot}/config/templates/aliyun-alicloud/template-1/metadata.json`, JSON.stringify({
+    id: "template-1",
+    providerTypeId: "aliyun-alicloud",
+    name: "Template",
+    version: "1",
+    variables: [
+      { name: "name", required: true, sensitive: false },
+      { name: "token", required: true, sensitive: true },
+      { name: "user_data", required: false, sensitive: false },
+    ],
+    fileNames: ["main.tf"],
+    resourceAddresses: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }));
+  await Bun.write(`${testRoot}/config/templates/aliyun-alicloud/template-1/files/main.tf`, 'resource "terraform_data" "x" {}\n');
+  await Bun.write(`${testRoot}/config/shells/aliyun-alicloud/init-shell/metadata.json`, JSON.stringify({
+    id: "init-shell",
+    providerTypeId: "aliyun-alicloud",
+    name: "Init Shell",
+    inline: ["printf 'init shell ok\\n'"],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }));
+  const apiMetadata = {
+    id: "safe-api",
+    providerTypeId: "aliyun-alicloud",
+    name: "Safe API",
+    keyId: "key-1",
+    templateId: "template-1",
+    shellId: "init-shell",
+    shellBinding: { shellId: "init-shell" },
+    allowedActions: ["deploy"],
+    revisionId: "revision-1",
+    snapshot: {
+      key: { id: "key-1", providerTypeId: "aliyun-alicloud", name: "Key", envKeys: [], updatedAt: "2026-01-01T00:00:00.000Z" },
+      template: {
+        id: "template-1",
+        providerTypeId: "aliyun-alicloud",
+        name: "Template",
+        version: "1",
+        variables: [
+          { name: "name", required: true, sensitive: false },
+          { name: "token", required: true, sensitive: true },
+          { name: "user_data", required: false, sensitive: false },
+        ],
+        files: { "main.tf": 'resource "terraform_data" "x" {}\n' },
+        fileNames: ["main.tf"],
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      shell: {
+        id: "init-shell",
+        providerTypeId: "aliyun-alicloud",
+        name: "Init Shell",
+        inline: ["printf 'init shell ok\\n'"],
+        startupVariable: "user_data",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    },
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  await Bun.write(`${testRoot}/config/apis/aliyun-alicloud/safe-api/metadata.json`, JSON.stringify(apiMetadata));
+  await Bun.write(`${testRoot}/config/apis/aliyun-alicloud/no-shell-api/metadata.json`, JSON.stringify({
+    ...apiMetadata,
+    id: "no-shell-api",
+    shellId: undefined,
+    shellBinding: undefined,
+    snapshot: { ...apiMetadata.snapshot, shell: undefined },
+  }));
+  await Bun.write(`${runDir}/run.json`, JSON.stringify({
+    id: "run-1",
+    apiId: "safe-api",
+    apiRevisionId: "revision-1",
+    providerTypeId: "aliyun-alicloud",
+    keyId: "key-1",
+    templateId: "template-1",
+    shellId: "init-shell",
+    action: "deploy",
+    status: "succeeded",
+    vars: {},
+    sensitiveVarNames: [],
+    stateId: "state-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }));
+  await Bun.write(`${noShellRunDir}/run.json`, JSON.stringify({
+    id: "run-no-shell",
+    apiId: "no-shell-api",
+    apiRevisionId: "revision-1",
+    providerTypeId: "aliyun-alicloud",
+    keyId: "key-1",
+    templateId: "template-1",
+    action: "deploy",
+    status: "succeeded",
+    vars: {},
+    sensitiveVarNames: [],
+    stateId: "state-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }));
+}
+
+async function createTestCallbackToken(apiId: string, runId: string, ttlMs: number) {
+  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = base64UrlEncode(JSON.stringify({ apiId, runId, nonce: crypto.randomUUID(), exp: Date.now() + ttlMs }));
+  const signature = await hmacSha256Base64Url(`${header}.${payload}`, "test-admin-key");
+  return `${header}.${payload}.${signature}`;
+}
+
+async function writeInitShellLog(testRoot: string, apiId: string, runId: string, content: string) {
+  await Bun.write(`${testRoot}/data/apis/${apiId}/runs/${runId}/init-shell.redacted.log`, content);
+}
+
+async function appendFixtureRunEvent(testRoot: string, apiId: string, runId: string, type: "init_shell_output" | "succeeded") {
+  await appendFile(`${testRoot}/data/apis/${apiId}/runs/${runId}/events.redacted.ndjson`, `${JSON.stringify({
+    id: crypto.randomUUID(),
+    apiId,
+    runId,
+    type,
+    createdAt: new Date().toISOString(),
+    message: type,
+  })}\n`);
+}
+
+async function openRunEventStream(origin: string, cookie: string, apiId: string, runId: string) {
+  const response = await fetch(`${origin}/ui/deployments/${apiId}/runs/${runId}/events/stream`, { headers: { cookie } });
+  expect(response.status).toBe(200);
+  if (!response.body) {
+    throw new Error("Expected run event stream body");
+  }
+  return { reader: response.body.getReader(), buffer: "" };
+}
+
+async function readNextSseEvent(stream: { reader: ReadableStreamDefaultReader<Uint8Array>; buffer: string }) {
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + 3000;
+  while (Date.now() <= deadline) {
+    const separatorIndex = stream.buffer.indexOf("\n\n");
+    if (separatorIndex !== -1) {
+      const rawEvent = stream.buffer.slice(0, separatorIndex);
+      stream.buffer = stream.buffer.slice(separatorIndex + 2);
+      const event = rawEvent.split("\n").find((line) => line.startsWith("event: "))?.slice("event: ".length);
+      if (event) {
+        return { event, rawEvent };
+      }
+    }
+    const result = await stream.reader.read();
+    if (result.done) {
+      throw new Error("Run event stream closed before next event");
+    }
+    stream.buffer += decoder.decode(result.value, { stream: true });
+  }
+  throw new Error("Timed out waiting for run event stream event");
+}
+
+async function hmacSha256Base64Url(value: string, secret: string) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  return base64UrlEncode(new Uint8Array(signature));
+}
+
+function base64UrlEncode(value: string | Uint8Array) {
+  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
 async function login(origin: string) {
