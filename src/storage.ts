@@ -315,7 +315,7 @@ export class PlatformStore {
     }
   }
 
-  async appendInitShellLog(apiId: string, runId: string, input: { nonce: string; sequence: number; content: string }) {
+  async appendInitShellLog(apiId: string, runId: string, input: { nonce: string; sequence: number; content: string | Uint8Array }) {
     const run = await this.getRun(apiId, runId);
     if (!run.shellId) {
       throw new Error(`Run ${runId} has no init shell`);
@@ -339,7 +339,7 @@ export class PlatformStore {
     await this.appendRunEvent(apiId, runId, {
       type: "init_shell_output",
       message: "init shell log received",
-      output: input.content,
+      output: typeof input.content === "string" ? input.content : new TextDecoder().decode(input.content),
     });
   }
 

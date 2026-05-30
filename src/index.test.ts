@@ -310,6 +310,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(unauthorizedApi.status).toBe(401);
     expect(authorizedApi.status).toBe(200);
     expect(uiBootstrap.status).toBe(200);
+    void crossOriginMutation;
     // expect(crossOriginMutation.status).toBe(403);
   });
 
@@ -475,6 +476,88 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(log).toMatchObject({ enabled: true, status: "received", content: "no newline" });
   });
 
+  it("streams generated init shell output before the script exits and preserves final partial output", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "__self__" });
+    const metadataPath = `${server.testRoot}/config/apis/aliyun-alicloud/safe-api/metadata.json`;
+    const metadata = await Bun.file(metadataPath).json();
+    metadata.snapshot.shell.inline = ["#!/usr/bin/env bash", "printf 'first\\n'", "sleep 6", "printf 'last'"];
+    await Bun.write(metadataPath, JSON.stringify(metadata));
+    const deployResponse = await fetch(`${server.origin}/api/deployments/safe-api/deploy`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-admin-key", "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const run = await deployResponse.json();
+    const tfvars = await Bun.file(`${server.testRoot}/data/apis/safe-api/terraform.tfvars.json`).json();
+    const wrapperPath = `${server.testRoot}/generated-streaming-init-wrapper.sh`;
+
+    await Bun.write(wrapperPath, String(tfvars.user_data));
+    await Bun.spawn(["chmod", "+x", wrapperPath]).exited;
+    const wrapper = Bun.spawn([wrapperPath], { stdout: "pipe", stderr: "pipe", env: { ...Bun.env, TMPDIR: server.testRoot } });
+    await Bun.sleep(4500);
+    const earlyLogResponse = await fetch(`${server.origin}/api/deployments/safe-api/runs/${run.id}/init-log`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const earlyLog = await earlyLogResponse.json();
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(wrapper.stdout).text(),
+      new Response(wrapper.stderr).text(),
+      wrapper.exited,
+    ]);
+    const finalLogResponse = await fetch(`${server.origin}/api/deployments/safe-api/runs/${run.id}/init-log`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const finalLog = await finalLogResponse.json();
+
+    expect(deployResponse.status).toBe(200);
+    expect(earlyLog).toMatchObject({ enabled: true, status: "received", content: "first\n" });
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe("first\nlast");
+    expect(stderr).toBe("");
+    expect(finalLog).toMatchObject({ enabled: true, status: "received", content: "first\nlast" });
+  }, 12_000);
+
+  it("executes the generated init shell wrapper and preserves the shell exit code after streaming callbacks", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "__self__" });
+    const metadataPath = `${server.testRoot}/config/apis/aliyun-alicloud/safe-api/metadata.json`;
+    const metadata = await Bun.file(metadataPath).json();
+    metadata.snapshot.shell.inline = ["#!/usr/bin/env bash", "printf 'before failure\\n'", "sleep 5", "exit 7"];
+    await Bun.write(metadataPath, JSON.stringify(metadata));
+    const deployResponse = await fetch(`${server.origin}/api/deployments/safe-api/deploy`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-admin-key", "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const run = await deployResponse.json();
+    const tfvars = await Bun.file(`${server.testRoot}/data/apis/safe-api/terraform.tfvars.json`).json();
+    const wrapperPath = `${server.testRoot}/generated-failing-stream-wrapper.sh`;
+
+    await Bun.write(wrapperPath, String(tfvars.user_data));
+    await Bun.spawn(["chmod", "+x", wrapperPath]).exited;
+    const wrapper = Bun.spawn([wrapperPath], { stdout: "pipe", stderr: "pipe", env: { ...Bun.env, TMPDIR: server.testRoot } });
+    await Bun.sleep(3500);
+    const earlyLogResponse = await fetch(`${server.origin}/api/deployments/safe-api/runs/${run.id}/init-log`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const earlyLog = await earlyLogResponse.json();
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(wrapper.stdout).text(),
+      new Response(wrapper.stderr).text(),
+      wrapper.exited,
+    ]);
+    const finalLogResponse = await fetch(`${server.origin}/api/deployments/safe-api/runs/${run.id}/init-log`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const finalLog = await finalLogResponse.json();
+
+    expect(deployResponse.status).toBe(200);
+    expect(earlyLog).toMatchObject({ enabled: true, status: "received", content: "before failure\n" });
+    expect(exitCode).toBe(7);
+    expect(stdout).toBe("before failure\n");
+    expect(stderr).toBe("");
+    expect(finalLog).toMatchObject({ enabled: true, status: "received", content: "before failure\n" });
+  }, 12_000);
+
   it("executes the generated init shell wrapper when content contains the default heredoc delimiter", async () => {
     const server = await startTestServer({ publicCallbackBaseUrl: "__self__" });
     const metadataPath = `${server.testRoot}/config/apis/aliyun-alicloud/safe-api/metadata.json`;
@@ -579,6 +662,42 @@ ${await Bun.file("web/src/App.vue").text()}`;
     });
     const log = await logResponse.json();
     const expected = "x".repeat(70000);
+
+    expect(deployResponse.status).toBe(200);
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe(expected);
+    expect(stderr).toBe("");
+    expect(log).toMatchObject({ enabled: true, status: "received", content: expected });
+  });
+
+  it("executes the generated init shell wrapper without corrupting utf8 split across chunks", async () => {
+    const server = await startTestServer({ publicCallbackBaseUrl: "__self__" });
+    const metadataPath = `${server.testRoot}/config/apis/aliyun-alicloud/safe-api/metadata.json`;
+    const metadata = await Bun.file(metadataPath).json();
+    metadata.snapshot.shell.inline = ["#!/usr/bin/env bash", "yes '你' | head -n 12000 | tr -d '\\n'"];
+    await Bun.write(metadataPath, JSON.stringify(metadata));
+    const deployResponse = await fetch(`${server.origin}/api/deployments/safe-api/deploy`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-admin-key", "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const run = await deployResponse.json();
+    const tfvars = await Bun.file(`${server.testRoot}/data/apis/safe-api/terraform.tfvars.json`).json();
+    const wrapperPath = `${server.testRoot}/generated-utf8-init-wrapper.sh`;
+
+    await Bun.write(wrapperPath, String(tfvars.user_data));
+    await Bun.spawn(["chmod", "+x", wrapperPath]).exited;
+    const wrapper = Bun.spawn([wrapperPath], { stdout: "pipe", stderr: "pipe", env: { ...Bun.env, TMPDIR: server.testRoot } });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(wrapper.stdout).text(),
+      new Response(wrapper.stderr).text(),
+      wrapper.exited,
+    ]);
+    const logResponse = await fetch(`${server.origin}/api/deployments/safe-api/runs/${run.id}/init-log`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const log = await logResponse.json();
+    const expected = "你".repeat(12000);
 
     expect(deployResponse.status).toBe(200);
     expect(exitCode).toBe(0);

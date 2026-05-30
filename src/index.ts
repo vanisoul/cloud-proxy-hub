@@ -81,12 +81,6 @@ const app = new Elysia()
       return;
     }
 
-    // 只讓 TOKEN 防禦, 避免多入口時的複雜化.
-    // if (isCrossOriginUiMutation(path, request)) {
-    //   logger.warn("拒絕跨來源 UI 請求", { path, method: request.method });
-    //   return new Response("Forbidden", { status: 403 });
-    // }
-
     const bearerAuthorized = headers.authorization?.replace(/^Bearer\s+/i, "") === appConfig.apiKey;
     if (path.startsWith("/api/")) {
       if (!bearerAuthorized) {
@@ -623,7 +617,7 @@ async function handleInitShellCallback(apiId: string, runId: string, request: Re
   if (!claims) {
     return new Response("Unauthorized", { status: 401 });
   }
-  const bytes = await request.arrayBuffer();
+  const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > initShellCallbackMaxBytes) {
     return new Response("Payload too large", { status: 413 });
   }
@@ -631,7 +625,7 @@ async function handleInitShellCallback(apiId: string, runId: string, request: Re
     await store.appendInitShellLog(apiId, runId, {
       nonce: claims.nonce,
       sequence,
-      content: new TextDecoder().decode(bytes),
+      content: bytes,
     });
   } catch (error) {
     if (error instanceof Error && error.message.includes("already used")) {
@@ -721,17 +715,6 @@ function buildClearedSessionCookieHeader(requestUrl: string) {
 function buildCookieHeader(requestUrl: string, cookieValue: string, maxAgeSeconds: number) {
   const secureAttribute = new URL(requestUrl).protocol === "https:" ? "; Secure" : "";
   return `${sessionCookieName}=${cookieValue}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureAttribute}`;
-}
-
-function isCrossOriginUiMutation(path: string, request: Request) {
-  if (!path.startsWith("/ui/") || request.method === "GET") {
-    return false;
-  }
-
-  const origin = request.headers.get("origin");
-  const requestUrl = new URL(request.url);
-  logger.warn("檢查跨來源 UI 請求", { path, method: request.method, origin, requestOrigin: requestUrl.origin });
-  return origin !== null && origin !== requestUrl.origin;
 }
 
 async function hasValidSessionCookie(request: Request) {

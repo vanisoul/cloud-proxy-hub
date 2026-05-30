@@ -799,7 +799,7 @@ describe("PlatformStore", () => {
     });
     const tfvars = await Bun.file(`${testRoot}/data/apis/shell-api/terraform.tfvars.json`).json();
 
-    expect(tfvars.user_data).toContain("curl -fsS -X POST");
+    expect(tfvars.user_data).toContain("curl --connect-timeout 2 --max-time 10 -fsS -X POST");
     expect(tfvars.user_data).toContain(`/callbacks/init-shell/shell-api/${run.id}?token=`);
     expect(tfvars.user_data).toContain('mktemp -d "${TMPDIR:-/tmp}/terraform-platform-init.XXXXXX"');
     expect(tfvars.user_data).toContain('trap \'rm -rf "$__terraform_platform_init_dir"\' EXIT HUP INT TERM');
@@ -866,7 +866,7 @@ describe("PlatformStore", () => {
     });
     Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
     await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 1, content: "init " });
-    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 2, content: "ok\n" });
+    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 2, content: "ok" });
     await expectRejects(
       store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 1, content: "replay\n" }),
       "already used",
@@ -874,7 +874,7 @@ describe("PlatformStore", () => {
     const initLog = await store.getInitShellLog("shell-api", run.id);
     const events = await store.listRunEvents("shell-api", run.id);
 
-    expect(initLog).toMatchObject({ status: "received", content: "init ok\n" });
+    expect(initLog).toMatchObject({ status: "received", content: "init ok" });
     expect(events.filter((event) => event.type === "init_shell_output")).toHaveLength(2);
     Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
   });
