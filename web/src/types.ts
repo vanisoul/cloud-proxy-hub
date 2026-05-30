@@ -64,6 +64,7 @@ export type ApiPublication = {
   name: string;
   keyId: string;
   templateId: string;
+  vars: Record<string, string>;
   shellId?: string;
   shellBinding?: ShellBinding;
   allowedActions: DeploymentAction[];
@@ -157,7 +158,7 @@ export type RuntimeCallExample = {
 export type RuntimeActionExample = {
   method: "POST";
   path: string;
-  body: { vars: Record<string, string> };
+  body: { vars?: Record<string, string> };
   curl: string;
 };
 

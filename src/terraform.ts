@@ -15,7 +15,7 @@ import type {
 } from "@/types";
 
 type RunInput = {
-  vars: Record<string, string>;
+  vars?: Record<string, string>;
 };
 
 export class TerraformService {
@@ -118,7 +118,13 @@ export class TerraformService {
       const template = api.snapshot.template;
       const runId = uuidV7();
       const callbackUrl = await createInitShellCallbackUrl(api.id, runId);
-      const varsWithShell = injectShellStartupVars(api, input.vars, callbackUrl);
+      const apiVars = await this.store.getApiVars(api);
+      const mergedVars = {
+        ...templateDefaultVars(template.variables),
+        ...apiVars,
+        ...(input.vars ?? {}),
+      };
+      const varsWithShell = injectShellStartupVars(api, mergedVars, callbackUrl);
       const missing = template.variables.filter(
         (variable) => variable.required && varsWithShell[variable.name] === undefined,
       );
@@ -503,6 +509,14 @@ function sanitizeVars(allowedNames: string[], vars: Record<string, string>) {
     sanitized[key] = value;
   }
   return sanitized;
+}
+
+function templateDefaultVars(variables: ApiPublication["snapshot"]["template"]["variables"]) {
+  return Object.fromEntries(
+    variables
+      .filter((variable) => variable.defaultValue !== undefined)
+      .map((variable) => [variable.name, variable.defaultValue as string]),
+  );
 }
 
 function redactVars(vars: Record<string, string>, sensitiveNames: string[]) {

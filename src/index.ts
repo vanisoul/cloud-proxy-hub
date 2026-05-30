@@ -62,12 +62,13 @@ const apiSchema = t.Object({
   name: t.String({ minLength: 1 }),
   keyId: idSchema,
   templateId: idSchema,
+  vars: t.Optional(stringRecord),
   shellBinding: t.Optional(shellBindingSchema),
   allowedActions: t.Array(t.Union([t.Literal("deploy"), t.Literal("delete")])),
 });
 
 const runSchema = t.Object({
-  vars: stringRecord,
+  vars: t.Optional(stringRecord),
 });
 
 const app = new Elysia()
@@ -211,7 +212,7 @@ const app = new Elysia()
   )
   .get(
     "/ui/providers/:providerTypeId/templates/:templateId",
-    async ({ params }) => store.getTemplate(params.providerTypeId, params.templateId),
+    async ({ params }) => store.getPublicTemplate(params.providerTypeId, params.templateId),
     { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
   )
   .delete(
@@ -367,7 +368,7 @@ const app = new Elysia()
   )
   .get(
     "/api/providers/:providerTypeId/templates/:templateId",
-    async ({ params }) => store.getTemplate(params.providerTypeId, params.templateId),
+    async ({ params }) => store.getPublicTemplate(params.providerTypeId, params.templateId),
     { params: t.Object({ providerTypeId: idSchema, templateId: idSchema }) },
   )
   .delete(

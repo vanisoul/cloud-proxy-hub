@@ -132,7 +132,12 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).toContain("async function saveShell()");
     expect(app).toContain("/shells");
     expect(app).toContain("const shellBinding = apiForm.shellId");
+    expect(app).toContain("const vars = parseStringRecord(apiForm.varsJson");
+    expect(app).toContain("vars,");
+    expect(app).toContain("body: JSON.stringify({}),");
     expect(app).toContain('v-model="apiForm.shellId"');
+    expect(app).toContain('v-model="apiForm.varsJson"');
+    expect(app).not.toContain("function buildRuntimeVars()");
     expect(app).toContain("shellExecutionHintKey");
     expect(i18n).toContain("Shell Library");
     expect(i18n).toContain("Shell 資料庫");
@@ -286,6 +291,35 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(crossOriginMutation.status).toBe(403);
   });
 
+  it("redacts legacy sensitive template defaults from UI and API template routes", async () => {
+    const server = await startTestServer();
+    const cookie = await login(server.origin);
+    const metadataPath = `${server.testRoot}/config/templates/aliyun-alicloud/template-1/metadata.json`;
+    const metadata = await Bun.file(metadataPath).json();
+    await Bun.write(metadataPath, JSON.stringify({
+      ...metadata,
+      variables: [
+        { name: "name", required: true, sensitive: false, defaultValue: "demo" },
+        { name: "token", required: true, sensitive: true, defaultValue: "legacy-secret" },
+        { name: "user_data", required: false, sensitive: false },
+      ],
+    }));
+
+    const uiResponse = await fetch(`${server.origin}/ui/providers/aliyun-alicloud/templates/template-1`, { headers: { cookie } });
+    const apiResponse = await fetch(`${server.origin}/api/providers/aliyun-alicloud/templates/template-1`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const uiBody = await uiResponse.text();
+    const apiBody = await apiResponse.text();
+
+    expect(uiResponse.status).toBe(200);
+    expect(apiResponse.status).toBe(200);
+    expect(uiBody).not.toContain("legacy-secret");
+    expect(apiBody).not.toContain("legacy-secret");
+    expect(uiBody).toContain("[REDACTED]");
+    expect(apiBody).toContain("[REDACTED]");
+  });
+
   it("reports init shell log disabled when callback base URL is unset", async () => {
     const server = await startTestServer();
     const cookie = await login(server.origin);
@@ -347,7 +381,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     const deployResponse = await fetch(`${server.origin}/api/deployments/safe-api/deploy`, {
       method: "POST",
       headers: { authorization: "Bearer test-admin-key", "content-type": "application/json" },
-      body: JSON.stringify({ vars: { name: "demo", token: "super-secret" } }),
+      body: JSON.stringify({}),
     });
     const run = await deployResponse.json();
     const tfvars = await Bun.file(`${server.testRoot}/data/apis/safe-api/terraform.tfvars.json`).json();
@@ -533,6 +567,7 @@ async function seedRuntimeFixture(testRoot: string) {
     name: "Safe API",
     keyId: "key-1",
     templateId: "template-1",
+    vars: { name: "demo", token: "super-secret" },
     shellId: "init-shell",
     shellBinding: { shellId: "init-shell" },
     allowedActions: ["deploy"],

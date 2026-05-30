@@ -53,6 +53,7 @@ type ApiForm = {
   keyId: string;
   templateId: string;
   shellId: string;
+  varsJson: string;
   allowedActions: DeploymentAction[];
 };
 
@@ -121,6 +122,7 @@ const apiForm = reactive<ApiForm>({
   keyId: "",
   templateId: "",
   shellId: "",
+  varsJson: "{}",
   allowedActions: [],
 });
 
@@ -131,6 +133,7 @@ const providerTemplates = computed(() =>
 );
 const providerShells = computed(() => state.shells.filter((shell) => shell.providerTypeId === selectedProviderId.value));
 const providerApis = computed(() => state.apis.filter((api) => api.providerTypeId === selectedProviderId.value));
+const selectedApiTemplate = computed(() => providerTemplates.value.find((template) => template.id === apiForm.templateId));
 const shellExecutionHintKey = computed<TranslationKey>(() => {
   if (selectedProviderId.value === "aliyun-alicloud") {
     return "dialog.shellExecutionAliyun";
@@ -141,7 +144,6 @@ const shellExecutionHintKey = computed<TranslationKey>(() => {
   return "dialog.shellExecutionGeneric";
 });
 const selectedRuntimeApi = computed(() => state.apis.find((api) => api.id === runtimeApiId.value));
-const selectedRuntimeTemplate = computed(() => selectedRuntimeApi.value?.snapshot.template);
 const deployDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("deploy"));
 const deleteDisabled = computed(() => !selectedRuntimeApi.value?.allowedActions.includes("delete"));
 const activeRunLoading = computed(() => runDetail.value?.status === "queued" || runDetail.value?.status === "running");
@@ -426,8 +428,13 @@ function openApiDialog(api?: ApiPublication) {
   apiForm.keyId = api?.keyId ?? providerKeys.value[0]?.id ?? "";
   apiForm.templateId = api?.templateId ?? providerTemplates.value[0]?.id ?? "";
   apiForm.shellId = api?.shellId ?? "";
+  apiForm.varsJson = JSON.stringify(api?.vars ?? apiDefaultVars(), null, 2);
   apiForm.allowedActions = [...(api?.allowedActions ?? provider?.supportedActions ?? [])];
   apiDialogVisible.value = true;
+}
+
+function apiTemplateChanged() {
+  apiForm.varsJson = JSON.stringify(apiDefaultVars(), null, 2);
 }
 
 async function saveApi() {
@@ -444,12 +451,14 @@ async function saveApi() {
           shellId: apiForm.shellId,
         }
       : undefined;
+    const vars = parseStringRecord(apiForm.varsJson, t("form.varsJson"));
     await requestJson<ApiPublication>(path, {
       method: "POST",
       body: JSON.stringify({
         name: apiForm.name,
         keyId: apiForm.keyId,
         templateId: apiForm.templateId,
+        vars,
         shellBinding,
         allowedActions: apiForm.allowedActions,
       }),
@@ -489,12 +498,6 @@ async function deleteResource(kind: ResourceKind, item: PublicProviderKey | Publ
   });
 }
 
-function buildRuntimeVars() {
-  return Object.fromEntries(
-    (selectedRuntimeTemplate.value?.variables ?? []).map((variable) => [variable.name, variable.defaultValue ?? ""]),
-  );
-}
-
 async function runtimeApiChanged() {
   closeRunEventsStream();
   resetRuntimePanels();
@@ -508,7 +511,7 @@ async function runtimeAction(action: DeploymentAction) {
     closeRunEventsStream();
     const result = await requestJson<TerraformRun>(`/ui/deployments/${encodeURIComponent(api.id)}/${action}/start`, {
       method: "POST",
-      body: JSON.stringify({ vars: buildRuntimeVars() }),
+      body: JSON.stringify({}),
     });
     if (!isCurrentRuntimeRequest(seq, api)) {
       return;
@@ -759,6 +762,25 @@ function parseJson(text: string, label: string): unknown {
   } catch (error) {
     throw new Error(t("error.invalidJson", { label }));
   }
+}
+
+function parseStringRecord(text: string, label: string): Record<string, string> {
+  const parsed = parseJson(text, label);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(t("error.jsonObject", { label }));
+  }
+  for (const value of Object.values(parsed)) {
+    if (typeof value !== "string") {
+      throw new Error(t("error.stringValues", { label }));
+    }
+  }
+  return parsed as Record<string, string>;
+}
+
+function apiDefaultVars() {
+  return Object.fromEntries(
+    (selectedApiTemplate.value?.variables ?? []).map((variable) => [variable.name, variable.defaultValue ?? ""]),
+  );
 }
 
 function isTemplateVariable(value: unknown): value is TemplateVariable {
@@ -1012,7 +1034,8 @@ function t(key: TranslationKey, params?: TranslationParams) {
     <el-form label-position="top">
       <el-form-item :label="t('form.name')" required><el-input v-model="apiForm.name" /></el-form-item>
       <el-form-item :label="t('form.key')" required><el-select v-model="apiForm.keyId"><el-option v-for="key in providerKeys" :key="key.id" :label="`${key.name} (${key.id})`" :value="key.id" /></el-select></el-form-item>
-      <el-form-item :label="t('form.template')" required><el-select v-model="apiForm.templateId"><el-option v-for="template in providerTemplates" :key="template.id" :label="`${template.name} (${template.id})`" :value="template.id" /></el-select></el-form-item>
+      <el-form-item :label="t('form.template')" required><el-select v-model="apiForm.templateId" @change="apiTemplateChanged"><el-option v-for="template in providerTemplates" :key="template.id" :label="`${template.name} (${template.id})`" :value="template.id" /></el-select></el-form-item>
+      <el-form-item :label="t('form.varsJson')"><el-input v-model="apiForm.varsJson" type="textarea" :rows="6" spellcheck="false" /></el-form-item>
       <el-form-item :label="t('form.shell')"><el-select v-model="apiForm.shellId" clearable><el-option v-for="shell in providerShells" :key="shell.id" :label="`${shell.name} (${shell.id})`" :value="shell.id" /></el-select></el-form-item>
       <div v-if="apiForm.shellId">
         <el-alert class="form-tip" :title="t('dialog.shellBindingTip')" type="info" show-icon :closable="false" />

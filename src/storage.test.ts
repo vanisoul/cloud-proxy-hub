@@ -92,6 +92,22 @@ describe("PlatformStore", () => {
     expect(file).toContain("terraform_data");
   });
 
+  it("rejects sensitive template variables with default values", async () => {
+    await store.initialize();
+
+    await expectRejects(
+      store.saveTemplate({
+        id: "sensitive-default",
+        name: "Sensitive default",
+        providerTypeId: "aliyun-alicloud",
+        version: "1.0.0",
+        variables: [{ name: "token", required: true, sensitive: true, defaultValue: "secret" }],
+        mainTf: 'resource "terraform_data" "x" {}',
+      }),
+      "Variable token is sensitive and cannot define defaultValue",
+    );
+  });
+
   it("stores provider-scoped shell resources as metadata", async () => {
     await store.initialize();
     const shell = await saveInitShell();
@@ -292,6 +308,7 @@ describe("PlatformStore", () => {
       keyId: "google-main",
       templateId: "google-shell-safe",
       shellBinding: shellBinding({ shellId: "google-init-shell" }),
+      vars: { name: "google-demo" },
       allowedActions: ["deploy"],
     });
 
@@ -382,9 +399,251 @@ describe("PlatformStore", () => {
     }
     expect(deployExample.method).toBe("POST");
     expect(deployExample.path).toBe("/api/deployments/safe-api/deploy");
-    expect(deployExample.body).toEqual({ vars: { name: "", token: "" } });
+    expect(deployExample.body).toEqual({});
     expect(deployExample.curl).toContain("/api/deployments/safe-api/deploy");
     expect(deployExample.curl).not.toContain("secret");
+  });
+
+  it("stores API publish vars and uses them when runtime vars are omitted", async () => {
+    const terraform = await createRuntimeFixture();
+    const api = await store.saveApi({
+      id: "api-vars",
+      providerTypeId: "aliyun-alicloud",
+      name: "API vars",
+      keyId: "aliyun-main",
+      templateId: "safe",
+      allowedActions: ["deploy"],
+      vars: { name: "api-demo", token: "api-secret" },
+    });
+
+    const run = await terraform.deploy(api, {});
+    const tfvars = await Bun.file(`${testRoot}/data/apis/api-vars/terraform.tfvars.json`).json();
+    const saved = await store.getRun("api-vars", run.id);
+    const metadata = await Bun.file(`${testRoot}/config/apis/aliyun-alicloud/api-vars/metadata.json`).text();
+    const loadedApi = await store.getApi("api-vars");
+
+    expect(tfvars).toEqual({ name: "api-demo", token: "api-secret" });
+    expect(saved.vars).toEqual({ name: "api-demo", token: "[REDACTED]" });
+    expect(metadata).not.toContain("api-secret");
+    expect(loadedApi.vars).toEqual({ name: "api-demo", token: "[REDACTED]" });
+  });
+
+  it("redacts legacy raw API metadata vars while keeping them usable for Terraform", async () => {
+    const terraform = await createRuntimeFixture();
+    const apiPath = `${testRoot}/config/apis/aliyun-alicloud/legacy-raw-vars/metadata.json`;
+    const api = await store.getApi("safe-api");
+    await Bun.write(apiPath, JSON.stringify({
+      ...api,
+      id: "legacy-raw-vars",
+      vars: { name: "legacy-demo", token: "legacy-secret" },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    const loaded = await store.getApi("legacy-raw-vars");
+    const listed = await store.listApis("aliyun-alicloud");
+    const run = await terraform.deploy(loaded, {});
+    const tfvars = await Bun.file(`${testRoot}/data/apis/legacy-raw-vars/terraform.tfvars.json`).json();
+
+    expect(loaded.vars).toEqual({ name: "legacy-demo", token: "[REDACTED]" });
+    expect(listed.find((item) => item.id === "legacy-raw-vars")?.vars).toEqual({ name: "legacy-demo", token: "[REDACTED]" });
+    expect(tfvars).toEqual({ name: "legacy-demo", token: "legacy-secret" });
+    expect((await store.getRun("legacy-raw-vars", run.id)).vars).toEqual({ name: "legacy-demo", token: "[REDACTED]" });
+  });
+
+  it("redacts legacy sensitive template defaults in API snapshots", async () => {
+    await createConfigFixture();
+    const metadataPath = `${testRoot}/config/templates/aliyun-alicloud/safe/metadata.json`;
+    const metadata = await Bun.file(metadataPath).json();
+    await Bun.write(metadataPath, JSON.stringify({
+      ...metadata,
+      variables: [
+        { name: "name", required: true, sensitive: false, defaultValue: "api-demo" },
+        { name: "token", required: true, sensitive: true, defaultValue: "legacy-secret" },
+      ],
+    }));
+
+    const template = await store.getPublicTemplate("aliyun-alicloud", "safe");
+    const api = await store.saveApi({
+      id: "legacy-template-default-api",
+      providerTypeId: "aliyun-alicloud",
+      name: "Legacy template default API",
+      keyId: "aliyun-main",
+      templateId: "safe",
+      allowedActions: ["deploy"],
+      vars: { token: "api-secret" },
+    });
+    const apiMetadata = await Bun.file(`${testRoot}/config/apis/aliyun-alicloud/legacy-template-default-api/metadata.json`).text();
+
+    expect(JSON.stringify(template)).not.toContain("legacy-secret");
+    expect(template.variables.find((variable) => variable.name === "token")?.defaultValue).toBe("[REDACTED]");
+    expect(JSON.stringify(api)).not.toContain("legacy-secret");
+    expect(api.snapshot.template.variables.find((variable) => variable.name === "token")?.defaultValue).toBe("[REDACTED]");
+    expect(apiMetadata).not.toContain("legacy-secret");
+  });
+
+  it("uses raw legacy API snapshot sensitive defaults without exposing them", async () => {
+    const terraform = await createRuntimeFixture();
+    const apiPath = `${testRoot}/config/apis/aliyun-alicloud/legacy-snapshot-default/metadata.json`;
+    const api = await store.getApi("safe-api");
+    await Bun.write(apiPath, JSON.stringify({
+      ...api,
+      id: "legacy-snapshot-default",
+      vars: {},
+      snapshot: {
+        ...api.snapshot,
+        template: {
+          ...api.snapshot.template,
+          variables: [
+            { name: "name", required: true, sensitive: false, defaultValue: "legacy-demo" },
+            { name: "token", required: true, sensitive: true, defaultValue: "legacy-secret" },
+          ],
+        },
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    const loaded = await store.getApi("legacy-snapshot-default");
+    await terraform.deploy(loaded, {});
+    const tfvars = await Bun.file(`${testRoot}/data/apis/legacy-snapshot-default/terraform.tfvars.json`).json();
+
+    expect(JSON.stringify(loaded)).not.toContain("legacy-secret");
+    expect(loaded.snapshot.template.variables.find((variable) => variable.name === "token")?.defaultValue).toBe("[REDACTED]");
+    expect(tfvars).toEqual({ name: "legacy-demo", token: "legacy-secret" });
+  });
+
+  it("uses raw legacy sensitive defaults when publishing with redacted placeholder vars", async () => {
+    const terraform = await createRuntimeFixture();
+    const metadataPath = `${testRoot}/config/templates/aliyun-alicloud/safe/metadata.json`;
+    const metadata = await Bun.file(metadataPath).json();
+    await Bun.write(metadataPath, JSON.stringify({
+      ...metadata,
+      variables: [
+        { name: "name", required: true, sensitive: false, defaultValue: "api-demo" },
+        { name: "token", required: true, sensitive: true, defaultValue: "legacy-secret" },
+      ],
+    }));
+
+    const template = await store.getPublicTemplate("aliyun-alicloud", "safe");
+    const api = await store.saveApi({
+      id: "legacy-redacted-placeholder-api",
+      providerTypeId: "aliyun-alicloud",
+      name: "Legacy redacted placeholder API",
+      keyId: "aliyun-main",
+      templateId: "safe",
+      allowedActions: ["deploy"],
+      vars: Object.fromEntries(template.variables.map((variable) => [variable.name, variable.defaultValue ?? ""])),
+    });
+
+    await terraform.deploy(api, {});
+    const tfvars = await Bun.file(`${testRoot}/data/apis/legacy-redacted-placeholder-api/terraform.tfvars.json`).json();
+
+    expect(api.vars).toEqual({ name: "api-demo", token: "[REDACTED]" });
+    expect(tfvars).toEqual({ name: "api-demo", token: "legacy-secret" });
+  });
+
+  it("rejects API publish vars that are not declared by the template", async () => {
+    await createConfigFixture();
+
+    await expectRejects(
+      store.saveApi({
+        id: "bad-vars-api",
+        providerTypeId: "aliyun-alicloud",
+        name: "Bad vars API",
+        keyId: "aliyun-main",
+        templateId: "safe",
+        allowedActions: ["deploy"],
+        vars: { undeclared: "value" },
+      }),
+      "Variable undeclared is not declared by this template",
+    );
+  });
+
+  it("rejects API publishing when required template vars are not provided", async () => {
+    await createConfigFixture();
+
+    await expectRejects(
+      store.saveApi({
+        id: "missing-vars-api",
+        providerTypeId: "aliyun-alicloud",
+        name: "Missing vars API",
+        keyId: "aliyun-main",
+        templateId: "safe",
+        allowedActions: ["deploy"],
+      }),
+      "Missing API variables: name, token",
+    );
+  });
+
+  it("preserves raw API vars when updating an API without vars", async () => {
+    const terraform = await createRuntimeFixture();
+    const original = await store.getApi("safe-api");
+    const updated = await store.saveApi({
+      id: original.id,
+      providerTypeId: original.providerTypeId,
+      name: "Safe API renamed",
+      keyId: original.keyId,
+      templateId: original.templateId,
+      allowedActions: original.allowedActions,
+    });
+
+    const run = await terraform.deploy(updated, {});
+    const tfvars = await Bun.file(`${testRoot}/data/apis/safe-api/terraform.tfvars.json`).json();
+    const saved = await store.getRun("safe-api", run.id);
+
+    expect(tfvars).toEqual({ name: "api-default", token: "api-token" });
+    expect(saved.vars).toEqual({ name: "api-default", token: "[REDACTED]" });
+  });
+
+  it("allows shell startup variables to satisfy required template vars", async () => {
+    const terraform = await createRuntimeFixture();
+    await store.saveTemplate({
+      id: "shell-required-startup",
+      providerTypeId: "aliyun-alicloud",
+      name: "Shell required startup",
+      version: "1.0.0",
+      variables: [
+        { name: "name", required: true, sensitive: false },
+        { name: "token", required: true, sensitive: true },
+        { name: "user_data", required: true, sensitive: false },
+      ],
+      files: { "main.tf": 'resource "alicloud_instance" "vm" { user_data = var.user_data }' },
+    });
+    const api = await store.saveApi({
+      id: "shell-required-startup-api",
+      providerTypeId: "aliyun-alicloud",
+      name: "Shell required startup API",
+      keyId: "aliyun-main",
+      templateId: "shell-required-startup",
+      shellBinding: shellBinding(),
+      allowedActions: ["deploy"],
+      vars: { name: "api-demo", token: "api-secret" },
+    });
+
+    await terraform.deploy(api, {});
+    const tfvars = await Bun.file(`${testRoot}/data/apis/shell-required-startup-api/terraform.tfvars.json`).json();
+
+    expect(tfvars).toEqual({ name: "api-demo", token: "api-secret", user_data: "printf 'init shell ok\\n'\n" });
+  });
+
+  it("keeps shell startup injection above API publish vars", async () => {
+    const terraform = await createRuntimeFixture();
+    const api = await store.saveApi({
+      id: "shell-api-vars",
+      providerTypeId: "aliyun-alicloud",
+      name: "Shell API vars",
+      keyId: "aliyun-main",
+      templateId: "shell-safe",
+      shellBinding: shellBinding(),
+      allowedActions: ["deploy"],
+      vars: { name: "api-demo", token: "api-secret", user_data: "api value" },
+    });
+
+    await terraform.deploy(api, {});
+    const tfvars = await Bun.file(`${testRoot}/data/apis/shell-api-vars/terraform.tfvars.json`).json();
+
+    expect(tfvars).toEqual({ name: "api-demo", token: "api-secret", user_data: "printf 'init shell ok\\n'\n" });
   });
 
   it("records API revision on runs and lists runtime history by API", async () => {
@@ -624,6 +883,7 @@ describe("PlatformStore", () => {
       keyId: "aliyun-main",
       templateId: "shell-safe",
       shellBinding: shellBinding({ shellId: "escaped-shell" }),
+      vars: { name: "api-default", token: "api-token" },
       allowedActions: ["deploy"],
     });
 
@@ -827,13 +1087,16 @@ describe("PlatformStore", () => {
       name: originalApi.name,
       keyId: originalApi.keyId,
       templateId: originalApi.templateId,
+      vars: { name: "republished-demo", token: "republished-secret" },
       allowedActions: originalApi.allowedActions,
     });
 
-    const run = await terraform.deploy(originalApi, { vars: { token: "super-secret", name: "demo" } });
+    const run = await terraform.deploy(originalApi, {});
+    const tfvars = await Bun.file(`${testRoot}/data/apis/safe-api/terraform.tfvars.json`).json();
 
     expect(republished.revisionId).not.toBe(originalApi.revisionId);
     expect(run.apiRevisionId).toBe(originalApi.revisionId);
+    expect(tfvars).toEqual({ name: "api-default", token: "api-token" });
     expect(await Bun.file(`${testRoot}/data/apis/safe-api/main.tf`).exists()).toBe(true);
     expect(await Bun.file(`${testRoot}/data/apis/safe-api/replacement.tf`).exists()).toBe(false);
   });
@@ -1099,6 +1362,7 @@ async function saveSafeApi() {
     name: "Safe API",
     keyId: "aliyun-main",
     templateId: "safe",
+    vars: { name: "api-default", token: "api-token" },
     allowedActions: ["deploy", "delete"],
   });
 }
@@ -1136,6 +1400,7 @@ async function saveShellApi() {
     keyId: "aliyun-main",
     templateId: "shell-safe",
     shellBinding: shellBinding(),
+    vars: { name: "api-default", token: "api-token" },
     allowedActions: ["deploy"],
   });
 }

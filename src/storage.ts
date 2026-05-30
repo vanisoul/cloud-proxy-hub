@@ -22,7 +22,11 @@ import type {
 
 type KeyInput = Omit<ProviderKey, "createdAt" | "updatedAt" | "id"> & { id?: string };
 type ShellInput = Omit<ShellResource, "createdAt" | "updatedAt" | "id"> & { id?: string };
-type ApiInput = Omit<ApiPublication, "createdAt" | "updatedAt" | "id" | "revisionId" | "snapshot" | "shellId"> & { id?: string };
+type ApiInput = Omit<ApiPublication, "createdAt" | "updatedAt" | "id" | "revisionId" | "snapshot" | "shellId" | "vars"> & {
+  id?: string;
+  vars?: Record<string, string>;
+};
+type ApiSecret = { vars: Record<string, string> };
 type RunEventInput = Omit<TerraformRunEvent, "id" | "apiId" | "runId" | "createdAt">;
 
 export class PlatformStore {
@@ -103,8 +107,14 @@ export class PlatformStore {
     return { ...metadata, files };
   }
 
+  async getPublicTemplate(providerTypeId: string, templateId: string): Promise<TerraformTemplate> {
+    const template = await this.getTemplate(providerTypeId, templateId);
+    return { ...template, variables: redactTemplateVariables(template.variables) };
+  }
+
   async saveTemplate(input: TerraformTemplateInput): Promise<PublicTerraformTemplate> {
     await this.getProviderType(input.providerTypeId);
+    validateTemplateVariables(input.variables);
     const files = normalizeTemplateFiles(input);
     const now = new Date().toISOString();
     const id = input.id ?? uuidV7();
@@ -189,7 +199,8 @@ export class PlatformStore {
   }
 
   async getProviderApi(providerTypeId: string, apiId: string): Promise<ApiPublication> {
-    return normalizeApiPublication(await this.readJson<ApiPublication>(this.apiPath(providerTypeId, apiId, "metadata.json")));
+    const api = normalizeApiPublication(await this.readJson<ApiPublication>(this.apiPath(providerTypeId, apiId, "metadata.json")));
+    return redactApiPublicationVars(api);
   }
 
   async saveApi(input: ApiInput): Promise<ApiPublication> {
@@ -215,11 +226,22 @@ export class PlatformStore {
     const now = new Date().toISOString();
     const id = input.id ?? uuidV7();
     const existing = await this.maybeReadJson<ApiPublication>(this.apiPath(input.providerTypeId, id, "metadata.json"));
+    const existingSecret = await this.maybeReadJson<ApiSecret>(this.apiPath(input.providerTypeId, id, "secret.json"));
+    const startupVariable = shell && input.shellBinding ? resolveShellStartupVariable(template, input.shellBinding.shellId) : undefined;
+    const vars = resolveApiVars(template, input.vars, existingSecret?.vars ?? {});
+    const missing = template.variables.filter(
+      (variable) => variable.name !== startupVariable && variable.required && isBlank(vars[variable.name]),
+    );
+    if (missing.length > 0) {
+      throw new Error(`Missing API variables: ${missing.map((variable) => variable.name).join(", ")}`);
+    }
+    const revisionId = uuidV7();
     const api: ApiPublication = {
       ...input,
       shellId: input.shellBinding?.shellId,
+      vars: redactApiVars(template, vars),
       id,
-      revisionId: uuidV7(),
+      revisionId,
       snapshot: toApiSnapshot(key, template, shell, input.shellBinding),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -227,8 +249,17 @@ export class PlatformStore {
     const apiDir = this.apiPath(api.providerTypeId, api.id);
     await mkdir(apiDir, { recursive: true });
     await this.writeJson(join(apiDir, "metadata.json"), api);
+    await this.writeJson(join(apiDir, "secret.json"), { vars });
+    await this.writeJson(join(apiDir, "revisions", revisionId, "secret.json"), { vars });
     await mkdir(this.apiDataPath(api.id, "runs"), { recursive: true });
     return api;
+  }
+
+  async getApiVars(api: ApiPublication) {
+    const revisionSecret = await this.maybeReadJson<ApiSecret>(this.apiPath(api.providerTypeId, api.id, "revisions", api.revisionId, "secret.json"));
+    const secret = await this.maybeReadJson<ApiSecret>(this.apiPath(api.providerTypeId, api.id, "secret.json"));
+    const metadata = await this.maybeReadJson<ApiPublication>(this.apiPath(api.providerTypeId, api.id, "metadata.json"));
+    return revisionSecret?.vars ?? secret?.vars ?? legacyApiVars(metadata) ?? api.vars ?? {};
   }
 
   async deleteApi(apiId: string) {
@@ -341,9 +372,7 @@ export class PlatformStore {
 
   async getRuntimeCallExample(apiId: string): Promise<RuntimeCallExample> {
     const api = await this.getApi(apiId);
-    const body = {
-      vars: Object.fromEntries(api.snapshot.template.variables.map((variable) => [variable.name, ""])),
-    };
+    const body = {};
     const example: RuntimeCallExample = {
       apiId: api.id,
       apiRevisionId: api.revisionId,
@@ -511,20 +540,132 @@ function toPublicKey(key: ProviderKey): PublicProviderKey {
 
 function toPublicTemplate(template: TerraformTemplate): PublicTerraformTemplate {
   const { files, ...rest } = template;
-  return { ...rest, fileNames: Object.keys(files).sort(), resourceAddresses: [...templateResourceAddresses(template)].sort() };
+  return {
+    ...rest,
+    variables: redactTemplateVariables(rest.variables),
+    fileNames: Object.keys(files).sort(),
+    resourceAddresses: [...templateResourceAddresses(template)].sort(),
+  };
 }
 
 function normalizeApiPublication(api: ApiPublication): ApiPublication {
-  if (api.shellBinding || !api.snapshot.shell) {
-    return api;
+  const normalized = {
+    ...api,
+    vars: api.vars ?? {},
+  };
+  if (normalized.shellBinding || !normalized.snapshot.shell) {
+    return normalized;
   }
   return {
-    ...api,
-    shellId: api.shellId ?? api.snapshot.shell.id,
+    ...normalized,
+    shellId: normalized.shellId ?? normalized.snapshot.shell.id,
     shellBinding: {
-      shellId: api.snapshot.shell.id,
+      shellId: normalized.snapshot.shell.id,
     },
   };
+}
+
+function redactApiPublicationVars(api: ApiPublication): ApiPublication {
+  return {
+    ...api,
+    vars: redactVarsByVariables(api.snapshot.template.variables, api.vars ?? {}),
+    snapshot: {
+      ...api.snapshot,
+      template: {
+        ...api.snapshot.template,
+        variables: redactTemplateVariables(api.snapshot.template.variables),
+      },
+    },
+  };
+}
+
+function legacyApiVars(api: ApiPublication | undefined) {
+  if (!api) {
+    return undefined;
+  }
+  const defaults = Object.fromEntries(
+    api.snapshot.template.variables
+      .filter((variable) => variable.defaultValue !== undefined)
+      .map((variable) => [variable.name, variable.defaultValue as string]),
+  );
+  const metadataVars = Object.fromEntries(
+    Object.entries(api.vars ?? {}).filter(([, value]) => value !== "[REDACTED]"),
+  );
+  return { ...defaults, ...metadataVars };
+}
+
+function validateTemplateVariables(variables: TerraformTemplate["variables"]) {
+  const invalid = variables.find((variable) => variable.sensitive && variable.defaultValue !== undefined);
+  if (invalid) {
+    throw new Error(`Variable ${invalid.name} is sensitive and cannot define defaultValue`);
+  }
+}
+
+function redactTemplateVariables(variables: TerraformTemplate["variables"]) {
+  return variables.map((variable) => variable.sensitive && variable.defaultValue !== undefined
+    ? { ...variable, defaultValue: "[REDACTED]" }
+    : variable);
+}
+
+function resolveApiVars(template: TerraformTemplate, vars: Record<string, string> | undefined, existingVars: Record<string, string>) {
+  const defaults = templateDefaultVars(template);
+  const preserved = declaredVars(template, existingVars);
+  if (vars === undefined) {
+    return { ...defaults, ...preserved };
+  }
+  return { ...defaults, ...preserved, ...sanitizeApiVars(template, vars, existingVars) };
+}
+
+function templateDefaultVars(template: TerraformTemplate) {
+  return Object.fromEntries(
+    template.variables
+      .filter((variable) => variable.defaultValue !== undefined)
+      .map((variable) => [variable.name, variable.defaultValue as string]),
+  );
+}
+
+function declaredVars(template: TerraformTemplate, vars: Record<string, string>) {
+  const variableNames = new Set(template.variables.map((variable) => variable.name));
+  return Object.fromEntries(Object.entries(vars).filter(([key]) => variableNames.has(key)));
+}
+
+function sanitizeApiVars(template: TerraformTemplate, vars: Record<string, string>, existingVars: Record<string, string>) {
+  const variablesByName = new Map(template.variables.map((variable) => [variable.name, variable]));
+  const sanitized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    const variable = variablesByName.get(key);
+    if (!variable) {
+      throw new Error(`Variable ${key} is not declared by this template`);
+    }
+    if (variable.sensitive && value === "[REDACTED]") {
+      if (existingVars[key] !== undefined) {
+        sanitized[key] = existingVars[key];
+        continue;
+      }
+      if (variable.defaultValue !== undefined) {
+        sanitized[key] = variable.defaultValue;
+        continue;
+      }
+      throw new Error(`Variable ${key} is sensitive and requires a value`);
+    }
+    sanitized[key] = value;
+  }
+  return sanitized;
+}
+
+function isBlank(value: string | undefined) {
+  return value === undefined || value.trim() === "";
+}
+
+function redactApiVars(template: TerraformTemplate, vars: Record<string, string>) {
+  return redactVarsByVariables(template.variables, vars);
+}
+
+function redactVarsByVariables(variables: TerraformTemplate["variables"], vars: Record<string, string>) {
+  const sensitiveNames = new Set(variables.filter((variable) => variable.sensitive).map((variable) => variable.name));
+  return Object.fromEntries(
+    Object.entries(vars).map(([key, value]) => [key, sensitiveNames.has(key) ? "[REDACTED]" : value]),
+  );
 }
 
 function apiReferencesShell(api: ApiPublication, shellId: string) {
@@ -577,7 +718,7 @@ function toApiSnapshot(
       providerTypeId: template.providerTypeId,
       name: template.name,
       version: template.version,
-      variables: template.variables,
+      variables: redactTemplateVariables(template.variables),
       files: template.files,
       fileNames: Object.keys(template.files).sort(),
       updatedAt: template.updatedAt,
@@ -659,7 +800,7 @@ function stripHclComments(content: string) {
 function runtimeActionExample(
   apiId: string,
   action: "deploy" | "delete",
-  body: { vars: Record<string, string> },
+  body: { vars?: Record<string, string> },
 ): NonNullable<RuntimeCallExample["deploy"]> {
   const path = `/api/deployments/${apiId}/${action}`;
   const json = JSON.stringify(body);
