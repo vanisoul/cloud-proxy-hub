@@ -132,11 +132,11 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).toContain("async function saveShell()");
     expect(app).toContain("/shells");
     expect(app).toContain("const shellBinding = apiForm.shellId");
-    expect(app).toContain("const vars = parseStringRecord(apiForm.varsJson");
+    expect(app).toContain("const vars = buildApiVars();");
     expect(app).toContain("vars,");
     expect(app).toContain("body: JSON.stringify({}),");
     expect(app).toContain('v-model="apiForm.shellId"');
-    expect(app).toContain('v-model="apiForm.varsJson"');
+    expect(app).toContain('v-model="apiForm.vars[variable.name]"');
     expect(app).not.toContain("function buildRuntimeVars()");
     expect(app).toContain("shellExecutionHintKey");
     expect(i18n).toContain("Shell Library");
@@ -149,6 +149,28 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(server).toContain('"/api/providers/:providerTypeId/shells"');
     expect(server).toContain("const shellBindingSchema");
     expect(server).toContain("shellId: idSchema");
+  });
+
+  it("renders API publication variables from the selected template instead of raw JSON", async () => {
+    const app = await Bun.file("web/src/App.vue").text();
+    const i18n = await Bun.file("web/src/i18n.ts").text();
+
+    expect(app).toContain("vars: Record<string, string>;");
+    expect(app).toContain("function resetApiVars(vars: Record<string, string> = {}) {");
+    expect(app).toContain("function buildApiVars() {");
+    expect(app).toContain("selectedApiTemplate?.variables ?? []");
+    expect(app).toContain('v-for="variable in selectedApiTemplate?.variables ?? []"');
+    expect(app).toContain('v-model="apiForm.vars[variable.name]"');
+    expect(app).toContain(':type="variable.sensitive ? \'password\' : \'text\'"');
+    expect(app).toContain(':show-password="variable.sensitive"');
+    expect(app).toContain("variable.required ? t('form.requiredVariable') : t('form.optionalVariable')");
+    expect(app).toContain("const vars = buildApiVars();");
+    expect(app).not.toContain("varsJson");
+    expect(app).not.toContain('parseStringRecord(apiForm.varsJson');
+    expect(app).not.toContain('v-model="apiForm.varsJson"');
+    expect(i18n).toContain('"form.vars": "Variables"');
+    expect(i18n).toContain('"form.vars": "變數"');
+    expect(i18n).not.toContain('"form.varsJson"');
   });
 
   it("defines focused runtime history, live events, and redacted event routes", async () => {
