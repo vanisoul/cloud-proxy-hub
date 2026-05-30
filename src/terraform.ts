@@ -552,24 +552,67 @@ chmod 0700 "$__terraform_platform_init_dir"
 __terraform_platform_init_log="$__terraform_platform_init_dir/init.log"
 __terraform_platform_init_script="$__terraform_platform_init_dir/init.script"
 __terraform_platform_init_chunk="$__terraform_platform_init_dir/init.chunk"
+__terraform_platform_init_post="$__terraform_platform_init_dir/init.post"
+__terraform_platform_init_seq="$__terraform_platform_init_dir/init.seq"
+__terraform_platform_init_offset="$__terraform_platform_init_dir/init.offset"
+__terraform_platform_init_done="$__terraform_platform_init_dir/init.done"
 __terraform_platform_init_callback=${shellQuote(callbackUrl)}
 trap 'rm -rf "$__terraform_platform_init_dir"' EXIT HUP INT TERM
 cat >"$__terraform_platform_init_script" <<'${heredocDelimiter}'
 ${shellContent}${heredocDelimiter}
 chmod 0700 "$__terraform_platform_init_script"
 : >"$__terraform_platform_init_log"
-"$__terraform_platform_init_script" >>"$__terraform_platform_init_log" 2>&1
-__terraform_platform_init_exit=$?
-__terraform_platform_seq=1
-while dd if="$__terraform_platform_init_log" of="$__terraform_platform_init_chunk" bs=60000 count=1 skip=$((__terraform_platform_seq - 1)) >/dev/null 2>&1 && [ -s "$__terraform_platform_init_chunk" ]; do
-  curl -fsS -X POST "$__terraform_platform_init_callback&seq=$__terraform_platform_seq" -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_chunk" >/dev/null 2>&1 || true
+: >"$__terraform_platform_init_chunk"
+printf '1\n' >"$__terraform_platform_init_seq"
+printf '0\n' >"$__terraform_platform_init_offset"
+__terraform_platform_post_file() {
+  if [ ! -s "$__terraform_platform_init_post" ]; then
+    return 0
+  fi
+  __terraform_platform_seq="$(cat "$__terraform_platform_init_seq")"
+  curl --connect-timeout 2 --max-time 10 -fsS -X POST "$__terraform_platform_init_callback&seq=$__terraform_platform_seq" -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_post" >/dev/null 2>&1 || true
   __terraform_platform_seq=$((__terraform_platform_seq + 1))
-done
+  printf '%s\n' "$__terraform_platform_seq" >"$__terraform_platform_init_seq"
+  : >"$__terraform_platform_init_post"
+}
+__terraform_platform_flush_available() {
+  __terraform_platform_offset="$(cat "$__terraform_platform_init_offset")"
+  __terraform_platform_size="$(wc -c <"$__terraform_platform_init_log" | tr -d ' ')"
+  while [ "$__terraform_platform_size" -gt "$__terraform_platform_offset" ]; do
+    __terraform_platform_remaining=$((__terraform_platform_size - __terraform_platform_offset))
+    if [ "$__terraform_platform_remaining" -gt 32768 ]; then
+      __terraform_platform_count=32768
+    else
+      __terraform_platform_count="$__terraform_platform_remaining"
+    fi
+    dd if="$__terraform_platform_init_log" of="$__terraform_platform_init_post" bs=1 skip="$__terraform_platform_offset" count="$__terraform_platform_count" >/dev/null 2>&1
+    cat "$__terraform_platform_init_post"
+    __terraform_platform_post_file
+    __terraform_platform_offset=$((__terraform_platform_offset + __terraform_platform_count))
+    printf '%s\n' "$__terraform_platform_offset" >"$__terraform_platform_init_offset"
+    __terraform_platform_size="$(wc -c <"$__terraform_platform_init_log" | tr -d ' ')"
+  done
+}
+__terraform_platform_poll_loop() {
+  while [ ! -f "$__terraform_platform_init_done" ]; do
+    __terraform_platform_flush_available
+    sleep 2
+  done
+  __terraform_platform_flush_available
+}
+__terraform_platform_poll_loop &
+__terraform_platform_poll_pid=$!
+"$__terraform_platform_init_script" >>"$__terraform_platform_init_log" 2>&1 &
+__terraform_platform_script_pid=$!
+wait "$__terraform_platform_script_pid"
+__terraform_platform_init_exit=$?
+touch "$__terraform_platform_init_done"
+wait "$__terraform_platform_poll_pid" 2>/dev/null || true
+__terraform_platform_flush_available
+__terraform_platform_seq="$(cat "$__terraform_platform_init_seq")"
 if [ "$__terraform_platform_seq" -eq 1 ]; then
-  : >"$__terraform_platform_init_chunk"
-  curl -fsS -X POST "$__terraform_platform_init_callback&seq=1" -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_chunk" >/dev/null 2>&1 || true
+  curl --connect-timeout 2 --max-time 10 -fsS -X POST "$__terraform_platform_init_callback&seq=1" -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_chunk" >/dev/null 2>&1 || true
 fi
-cat "$__terraform_platform_init_log"
 exit "$__terraform_platform_init_exit"
 `;
 }
