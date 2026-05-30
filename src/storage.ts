@@ -315,21 +315,21 @@ export class PlatformStore {
     }
   }
 
-  async appendInitShellLog(apiId: string, runId: string, input: { nonce: string; content: string }) {
+  async appendInitShellLog(apiId: string, runId: string, input: { nonce: string; sequence: number; content: string }) {
     const run = await this.getRun(apiId, runId);
     if (!run.shellId) {
       throw new Error(`Run ${runId} has no init shell`);
     }
-    const noncePath = this.runPath(apiId, runId, "init-shell-nonces", `${input.nonce}.json`);
+    const noncePath = this.runPath(apiId, runId, "init-shell-nonces", input.nonce, `${input.sequence}.json`);
     await mkdir(dirname(noncePath), { recursive: true });
     try {
-      await writeFile(noncePath, `${JSON.stringify({ nonce: input.nonce, createdAt: new Date().toISOString() }, null, 2)}\n`, {
+      await writeFile(noncePath, `${JSON.stringify({ nonce: input.nonce, sequence: input.sequence, createdAt: new Date().toISOString() }, null, 2)}\n`, {
         flag: "wx",
         mode: 0o600,
       });
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-        throw new Error(`Init shell callback nonce ${input.nonce} already used`);
+        throw new Error(`Init shell callback nonce ${input.nonce} sequence ${input.sequence} already used`);
       }
       throw error;
     }

@@ -801,8 +801,47 @@ describe("PlatformStore", () => {
 
     expect(tfvars.user_data).toContain("curl -fsS -X POST");
     expect(tfvars.user_data).toContain(`/callbacks/init-shell/shell-api/${run.id}?token=`);
+    expect(tfvars.user_data).toContain('mktemp -d "${TMPDIR:-/tmp}/terraform-platform-init.XXXXXX"');
+    expect(tfvars.user_data).toContain('trap \'rm -rf "$__terraform_platform_init_dir"\' EXIT HUP INT TERM');
+    expect(tfvars.user_data).toContain("cat >\"$__terraform_platform_init_script\"");
+    expect(tfvars.user_data).toContain("chmod 0700 \"$__terraform_platform_init_script\"");
+    expect(tfvars.user_data).toContain('"$__terraform_platform_init_script"');
     expect(tfvars.user_data).toContain("printf 'init shell ok\\n'");
+    expect(tfvars.user_data).not.toContain("(\nprintf 'init shell ok\\n'");
+    expect(tfvars.user_data).not.toContain("terraform-platform-init-$$");
     expect(JSON.stringify(run)).not.toContain("token=");
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
+  });
+
+  it("preserves user shell shebang by executing a generated script file", async () => {
+    Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
+    const terraform = await createRuntimeFixture();
+    await store.saveShell({
+      id: "bash-shell",
+      providerTypeId: "aliyun-alicloud",
+      name: "Bash shell",
+      inline: ["#!/usr/bin/env bash", "set -euo pipefail", "printf 'bash init ok\\n'"],
+    });
+    await store.saveApi({
+      id: "bash-shell-api",
+      providerTypeId: "aliyun-alicloud",
+      name: "Bash Shell API",
+      keyId: "aliyun-main",
+      templateId: "shell-safe",
+      shellBinding: shellBinding({ shellId: "bash-shell" }),
+      vars: { name: "api-default", token: "api-token" },
+      allowedActions: ["deploy"],
+    });
+
+    await terraform.deploy(await store.getApi("bash-shell-api"), {
+      vars: { token: "super-secret", name: "demo" },
+    });
+    const tfvars = await Bun.file(`${testRoot}/data/apis/bash-shell-api/terraform.tfvars.json`).json();
+
+    expect(tfvars.user_data).toContain("cat >\"$__terraform_platform_init_script\"");
+    expect(tfvars.user_data).toContain("#!/usr/bin/env bash\nset -euo pipefail\nprintf 'bash init ok\\n'");
+    expect(tfvars.user_data).toContain('"$__terraform_platform_init_script"');
+    expect(tfvars.user_data).not.toContain("(\n#!/usr/bin/env bash");
     Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
   });
 
@@ -820,22 +859,23 @@ describe("PlatformStore", () => {
     Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
   });
 
-  it("persists init shell logs with nonce replay protection", async () => {
+  it("persists init shell log chunks with sequence replay protection", async () => {
     const terraform = await createRuntimeFixture();
     const run = await terraform.deploy(await store.getApi("shell-api"), {
       vars: { token: "super-secret", name: "demo" },
     });
     Bun.env.PUBLIC_CALLBACK_BASE_URL = "http://127.0.0.1:3000";
-    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", content: "init ok\n" });
+    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 1, content: "init " });
+    await store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 2, content: "ok\n" });
     await expectRejects(
-      store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", content: "replay\n" }),
+      store.appendInitShellLog("shell-api", run.id, { nonce: "nonce-1", sequence: 1, content: "replay\n" }),
       "already used",
     );
     const initLog = await store.getInitShellLog("shell-api", run.id);
     const events = await store.listRunEvents("shell-api", run.id);
 
     expect(initLog).toMatchObject({ status: "received", content: "init ok\n" });
-    expect(events.at(-1)?.type).toBe("init_shell_output");
+    expect(events.filter((event) => event.type === "init_shell_output")).toHaveLength(2);
     Bun.env.PUBLIC_CALLBACK_BASE_URL = "";
   });
 
@@ -850,7 +890,7 @@ describe("PlatformStore", () => {
 
     expect(initLog).toMatchObject({ enabled: false, status: "disabled", reason: "Run has no init shell" });
     await expectRejects(
-      store.appendInitShellLog("safe-api", run.id, { nonce: "nonce-1", content: "should not persist\n" }),
+      store.appendInitShellLog("safe-api", run.id, { nonce: "nonce-1", sequence: 1, content: "should not persist\n" }),
       "has no init shell",
     );
     Bun.env.PUBLIC_CALLBACK_BASE_URL = "";

@@ -615,6 +615,10 @@ async function handleInitShellCallback(apiId: string, runId: string, request: Re
     return new Response("Payload too large", { status: 413 });
   }
   const token = new URL(request.url).searchParams.get("token") ?? "";
+  const sequence = initShellCallbackSequence(request.url);
+  if (sequence === undefined) {
+    return new Response("Invalid sequence", { status: 400 });
+  }
   const claims = await verifyInitShellCallbackToken(token, apiId, runId);
   if (!claims) {
     return new Response("Unauthorized", { status: 401 });
@@ -626,6 +630,7 @@ async function handleInitShellCallback(apiId: string, runId: string, request: Re
   try {
     await store.appendInitShellLog(apiId, runId, {
       nonce: claims.nonce,
+      sequence,
       content: new TextDecoder().decode(bytes),
     });
   } catch (error) {
@@ -638,6 +643,15 @@ async function handleInitShellCallback(apiId: string, runId: string, request: Re
     throw error;
   }
   return { ok: true };
+}
+
+function initShellCallbackSequence(url: string) {
+  const value = new URL(url).searchParams.get("seq") ?? "1";
+  if (!/^[1-9]\d*$/.test(value)) {
+    return undefined;
+  }
+  const sequence = Number(value);
+  return Number.isSafeInteger(sequence) ? sequence : undefined;
 }
 
 async function shouldCloseRunEventsStream(apiId: string, runId: string, events: Array<{ type: string }>) {

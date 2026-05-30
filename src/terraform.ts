@@ -545,16 +545,44 @@ function injectShellStartupVars(api: ApiPublication, vars: Record<string, string
 }
 
 function initShellCallbackWrapper(shellContent: string, callbackUrl: string) {
+  const heredocDelimiter = shellHeredocDelimiter(shellContent);
   return `#!/usr/bin/env sh
-__terraform_platform_init_log="\${TMPDIR:-/tmp}/terraform-platform-init-$$.log"
-(
-${shellContent}) >"$__terraform_platform_init_log" 2>&1
+__terraform_platform_init_dir="$(mktemp -d "\${TMPDIR:-/tmp}/terraform-platform-init.XXXXXX")"
+chmod 0700 "$__terraform_platform_init_dir"
+__terraform_platform_init_log="$__terraform_platform_init_dir/init.log"
+__terraform_platform_init_script="$__terraform_platform_init_dir/init.script"
+__terraform_platform_init_chunk="$__terraform_platform_init_dir/init.chunk"
+__terraform_platform_init_callback=${shellQuote(callbackUrl)}
+trap 'rm -rf "$__terraform_platform_init_dir"' EXIT HUP INT TERM
+cat >"$__terraform_platform_init_script" <<'${heredocDelimiter}'
+${shellContent}${heredocDelimiter}
+chmod 0700 "$__terraform_platform_init_script"
+: >"$__terraform_platform_init_log"
+"$__terraform_platform_init_script" >>"$__terraform_platform_init_log" 2>&1
 __terraform_platform_init_exit=$?
-curl -fsS -X POST ${shellQuote(callbackUrl)} -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_log" >/dev/null 2>&1 || true
+__terraform_platform_seq=1
+while dd if="$__terraform_platform_init_log" of="$__terraform_platform_init_chunk" bs=60000 count=1 skip=$((__terraform_platform_seq - 1)) >/dev/null 2>&1 && [ -s "$__terraform_platform_init_chunk" ]; do
+  curl -fsS -X POST "$__terraform_platform_init_callback&seq=$__terraform_platform_seq" -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_chunk" >/dev/null 2>&1 || true
+  __terraform_platform_seq=$((__terraform_platform_seq + 1))
+done
+if [ "$__terraform_platform_seq" -eq 1 ]; then
+  : >"$__terraform_platform_init_chunk"
+  curl -fsS -X POST "$__terraform_platform_init_callback&seq=1" -H 'Content-Type: text/plain' --data-binary @"$__terraform_platform_init_chunk" >/dev/null 2>&1 || true
+fi
 cat "$__terraform_platform_init_log"
-rm -f "$__terraform_platform_init_log"
 exit "$__terraform_platform_init_exit"
 `;
+}
+
+function shellHeredocDelimiter(content: string) {
+  let suffix = 0;
+  let delimiter = "__TERRAFORM_PLATFORM_INIT_SHELL__";
+  const lines = new Set(content.split(/\r?\n/));
+  while (lines.has(delimiter)) {
+    suffix += 1;
+    delimiter = `__TERRAFORM_PLATFORM_INIT_SHELL_${suffix}__`;
+  }
+  return delimiter;
 }
 
 function shellQuote(value: string) {
