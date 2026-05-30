@@ -1,0 +1,32 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: terraform-platform
+  labels:
+    app.kubernetes.io/name: terraform-platform
+  annotations:
+    # Public HTTP paths for browser/API access:
+    # - / redirects unauthenticated users to /login
+    # - /login and /assets/* are unauthenticated UI entry paths
+    # - /ui/* uses the signed admin session cookie
+    # - /api/* requires Authorization: Bearer <ADMIN_API_KEY>
+    # - /callbacks/init-shell/* accepts signed one-time init-shell log callbacks
+    # Do not expose filesystem paths such as /app/config, /app/data, /config, or /data.
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - terraform-platform.example.com
+      secretName: terraform-platform-tls
+  rules:
+    - host: terraform-platform.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: terraform-platform
+                port:
+                  name: http
