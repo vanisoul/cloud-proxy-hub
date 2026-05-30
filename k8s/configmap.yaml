@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: terraform-platform-config
+  labels:
+    app.kubernetes.io/name: terraform-platform
+data:
+  PORT: "3000"
+  CONFIG_DIR: "/app/config"
+  DATA_DIR: "/app/data"
+  TERRAFORM_BIN: "terraform"
+  # Set this to the public HTTPS origin only when deployed VMs must post init-shell logs back.
+  # Example: https://terraform-platform.example.com
+  PUBLIC_CALLBACK_BASE_URL: ""
