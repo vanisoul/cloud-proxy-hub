@@ -427,7 +427,8 @@ const app = new Elysia()
         if (!(await constantTimeEqualText(runtimeOutputCredential(headers), appConfig.apiKey))) {
           throw new Error("Unauthorized");
         }
-        return await store.getRuntimeOutput(params.apiId, params.outputName);
+        const output = await store.getRuntimeOutput(params.apiId, params.outputName);
+        return runtimeOutputValueResponse(output.value);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         set.status = runtimeOutputStatus(message);
@@ -799,6 +800,13 @@ function getCookieValue(cookieHeader: string | null, cookieName: string) {
 function runtimeOutputCredential(headers: Record<string, string | undefined>) {
   const bearer = headers.authorization?.replace(/^Bearer\s+/i, "");
   return headers["x-api-key"] ?? bearer ?? "";
+}
+
+function runtimeOutputValueResponse(value: unknown) {
+  if (typeof value === "string") {
+    return new Response(value, { headers: { "content-type": "text/plain; charset=utf-8" } });
+  }
+  return Response.json(value);
 }
 
 function runtimeOutputStatus(message: string) {

@@ -60,7 +60,7 @@ See `.env.example` for supported platform variables:
 
 Set `Authorization: Bearer <ADMIN_API_KEY>` for all API routes.
 
-`GET /api/runtime/:apiId/outputs/:outputName` is the read-only runtime output surface for consumers. It accepts `ADMIN_API_KEY` with `X-API-Key: <ADMIN_API_KEY>` or `Authorization: Bearer <ADMIN_API_KEY>`. The route returns one top-level Terraform output value from the latest successful deploy snapshot and never returns admin run metadata. Successful delete disables the current runtime output. Runtime output curl examples in the UI use `PUBLIC_CALLBACK_BASE_URL` as their public origin.
+`GET /api/runtime/:apiId/outputs/:outputName` is the read-only runtime output surface for consumers. It accepts `ADMIN_API_KEY` with `X-API-Key: <ADMIN_API_KEY>` or `Authorization: Bearer <ADMIN_API_KEY>`. The route returns one top-level Terraform output value from the latest successful deploy snapshot and never returns admin run metadata. String outputs are returned as raw text; object, array, number, boolean, and null outputs are returned as the JSON value itself without an API wrapper. Error responses remain JSON objects with `error` and `message`. Successful delete disables the current runtime output. Runtime output curl examples in the UI use `PUBLIC_CALLBACK_BASE_URL` as their public origin.
 
 Only share runtime output curl examples with consumers who may hold `ADMIN_API_KEY`; that token can also access admin API routes.
 
