@@ -65,11 +65,12 @@ kubectl apply --dry-run=server -k k8s
 
 ## Network Exposure
 
-Security-first default: keep the admin service private. Expose only the callback path to the public internet when init-shell logs are enabled.
+Security-first default: keep the admin service private. Expose only the callback path when init-shell logs are enabled and the runtime output path when consumers need deployed output values.
 
-Public path:
+Public paths:
 
 - `/callbacks/init-shell/*`: signed one-time callback endpoint for VM init-shell logs. This must be reachable from deployed VMs when `PUBLIC_CALLBACK_BASE_URL` is configured.
+- `/api/runtime/*`: consumer runtime output endpoint protected by the per-API runtime output token in `X-API-Key` or `Authorization: Bearer`. Expose only when consumers need direct output reads.
 
 Internal-only paths by default:
 
@@ -77,7 +78,7 @@ Internal-only paths by default:
 - `/login`: login form and login submit endpoint.
 - `/assets/*`: built SPA assets.
 - `/ui/*`: admin UI API, protected by the signed session cookie.
-- `/api/*`: automation/API routes, protected by `Authorization: Bearer <ADMIN_API_KEY>`.
+- `/api/*` except `/api/runtime/*`: automation/API routes, protected by `Authorization: Bearer <ADMIN_API_KEY>`.
 
 Expose admin UI/API paths only after an explicit risk review, ideally through VPN, private load balancer, bastion access, zero-trust access proxy, or another internal-only control plane.
 

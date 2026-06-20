@@ -5,8 +5,8 @@ metadata:
   labels:
     app.kubernetes.io/name: terraform-platform
   annotations:
-    # Public path requirement: /callbacks/init-shell/* must be reachable by deployed VMs when init-shell logs are enabled.
-    # Security-first default: keep admin UI/API paths (/, /login, /assets/*, /ui/*, /api/*) private or internal-only.
+    # Public path requirements: /callbacks/init-shell/* for VM callbacks and /api/runtime/* for token-protected consumer output reads.
+    # Security-first default: keep admin UI/API paths (/, /login, /assets/*, /ui/*, /api/* except /api/runtime/*) private or internal-only.
     # Never expose filesystem paths such as /app/config, /app/data, /config, or /data.
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-body-size: "2m"
@@ -21,6 +21,13 @@ spec:
       http:
         paths:
           - path: /callbacks/init-shell
+            pathType: Prefix
+            backend:
+              service:
+                name: terraform-platform
+                port:
+                  name: http
+          - path: /api/runtime
             pathType: Prefix
             backend:
               service:

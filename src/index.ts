@@ -78,11 +78,11 @@ const app = new Elysia()
       return;
     }
 
-    if (path.startsWith("/callbacks/init-shell/")) {
+    if (path.startsWith("/callbacks/init-shell/") || path.startsWith("/api/runtime/")) {
       return;
     }
 
-    const bearerAuthorized = headers.authorization?.replace(/^Bearer\s+/i, "") === appConfig.apiKey;
+    const bearerAuthorized = await constantTimeEqualText(headers.authorization?.replace(/^Bearer\s+/i, "") ?? "", appConfig.apiKey);
     if (path.startsWith("/api/")) {
       if (!bearerAuthorized) {
         logger.warn("拒絕未授權請求", { path, method: request.method });
@@ -288,6 +288,9 @@ const app = new Elysia()
   .get("/ui/deployments/:apiId/output", async ({ params }) => terraform.output(params.apiId), {
     params: t.Object({ apiId: idSchema }),
   })
+  .get("/ui/deployments/:apiId/runtime-outputs", async ({ params }) => store.listRuntimeOutputs(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
   .get("/ui/deployments/:apiId/runs", async ({ params }) => store.listRuns(params.apiId), {
     params: t.Object({ apiId: idSchema }),
   })
@@ -416,6 +419,22 @@ const app = new Elysia()
   .get("/api/apis/:apiId", async ({ params }) => store.getApi(params.apiId), {
     params: t.Object({ apiId: idSchema }),
   })
+  .post("/api/apis/:apiId/runtime-output-token", async ({ params }) => store.rotateRuntimeOutputToken(params.apiId), {
+    params: t.Object({ apiId: idSchema }),
+  })
+  .get(
+    "/api/runtime/:apiId/outputs/:outputName",
+    async ({ headers, params, set }) => {
+      try {
+        return await store.getRuntimeOutput(params.apiId, params.outputName, runtimeOutputToken(headers));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        set.status = runtimeOutputStatus(message);
+        return { error: runtimeOutputErrorCode(message), message: runtimeOutputMessage(message) };
+      }
+    },
+    { params: t.Object({ apiId: idSchema, outputName: t.String({ minLength: 1 }) }) },
+  )
   .delete(
     "/api/apis/:apiId",
     async ({ params }) => {
@@ -774,6 +793,50 @@ function getCookieValue(cookieHeader: string | null, cookieName: string) {
   }
 
   return "";
+}
+
+function runtimeOutputToken(headers: Record<string, string | undefined>) {
+  const bearer = headers.authorization?.replace(/^Bearer\s+/i, "");
+  return headers["x-api-key"] ?? bearer ?? "";
+}
+
+function runtimeOutputStatus(message: string) {
+  if (message === "Unauthorized") {
+    return 401;
+  }
+  if (message.startsWith("API ")) {
+    return 401;
+  }
+  if (message.includes("not found")) {
+    return 404;
+  }
+  if (message.includes("unavailable") || message.includes("not available")) {
+    return 409;
+  }
+  return 500;
+}
+
+function runtimeOutputErrorCode(message: string) {
+  if (message === "Unauthorized") {
+    return "unauthorized";
+  }
+  if (message.startsWith("API ")) {
+    return "unauthorized";
+  }
+  if (message.startsWith("Output ")) {
+    return "output_not_found";
+  }
+  if (message.includes("after delete")) {
+    return "deleted";
+  }
+  if (message.includes("not available")) {
+    return "not_deployed";
+  }
+  return "runtime_output_failed";
+}
+
+function runtimeOutputMessage(message: string) {
+  return message.startsWith("API ") ? "Unauthorized" : message;
 }
 
 async function constantTimeEqualText(left: string, right: string) {

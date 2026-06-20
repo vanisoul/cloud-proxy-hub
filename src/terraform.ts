@@ -264,7 +264,28 @@ export class TerraformService {
       message: `${run.action} ${updated.status}`,
       output: redactedOutput,
     });
+    if (updated.status === "succeeded" && run.action === "deploy") {
+      await this.saveOutputSnapshot(run, workDir, env);
+    }
+    if (updated.status === "succeeded" && run.action === "delete") {
+      await this.store.disableRuntimeOutput(run.apiId, run.id);
+    }
     return updated;
+  }
+
+  private async saveOutputSnapshot(run: TerraformRun, workDir: string, env: Record<string, string | undefined>) {
+    const result = await runTerraform(["output", "-json"], workDir, env);
+    if (result.exitCode !== 0) {
+      await this.store.disableRuntimeOutput(run.apiId, run.id, "output_failed");
+      return;
+    }
+    await this.store.saveRuntimeOutputSnapshot({
+      apiId: run.apiId,
+      runId: run.id,
+      revisionId: run.apiRevisionId,
+      capturedAt: new Date().toISOString(),
+      outputs: redactTerraformOutputs(parseOutputJson(result.output)),
+    });
   }
 
   private async runCommand(

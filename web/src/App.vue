@@ -23,6 +23,8 @@ import type {
   PublicProviderKey,
   PublicTerraformTemplate,
   RuntimeCallExample,
+  RuntimeOutputListing,
+  RuntimeTerraformOutput,
   ShellResource,
   TerraformRun,
   TerraformRunEvent,
@@ -34,6 +36,7 @@ type PageKey = "dashboard" | "keys" | "templates" | "shells" | "apis" | "runtime
 type ResourceKind = "key" | "template" | "shell" | "api";
 type ElementTagType = "primary" | "success" | "warning" | "danger" | "info";
 type DisplayRunEvent = TerraformRunEvent & { groupedEventIds: string[] };
+type RuntimeOutputRow = { name: string; output: RuntimeTerraformOutput };
 
 type KeyForm = {
   name: string;
@@ -99,6 +102,7 @@ const runDetail = ref<TerraformRun | null>(null);
 const runEvents = ref<TerraformRunEvent[]>([]);
 const initShellLog = ref<InitShellLogResponse | null>(null);
 const runtimeCallExample = ref<RuntimeCallExample | null>(null);
+const runtimeOutputs = ref<RuntimeOutputListing | null>(null);
 const runtimeRunDialogVisible = ref(false);
 const selectedRunEventId = ref("");
 const currentLocale = ref<LocaleKey>(loadSavedLocale());
@@ -193,6 +197,11 @@ const runtimeRunDialogTitle = computed(() => {
   return t("runtime.runDialogTitle", { action: runDetail.value.action, runId: runDetail.value.id });
 });
 const runtimeHistoryItems = computed(() => runList.value ?? []);
+const runtimeOutputRows = computed<RuntimeOutputRow[]>(() =>
+  Object.entries(runtimeOutputs.value?.outputs ?? {})
+    .map(([name, output]) => ({ name, output }))
+    .sort((left, right) => left.name.localeCompare(right.name)),
+);
 const elementLocale = computed(() => elementPlusLocales[currentLocale.value]);
 const selectedLocale = computed({
   get: () => currentLocale.value,
@@ -245,7 +254,7 @@ async function loadBootstrap() {
     if (!runtimeApiId.value || !state.apis.some((api) => api.id === runtimeApiId.value)) {
       runtimeApiId.value = providerApis.value[0]?.id ?? "";
     }
-    await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq)]);
+    await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq), loadRuntimeOutputs(false, runtimeRequestSeq)]);
   } finally {
     loading.value = false;
   }
@@ -254,7 +263,7 @@ async function loadBootstrap() {
 async function providerChanged() {
   runtimeApiId.value = providerApis.value[0]?.id ?? "";
   resetRuntimePanels();
-  await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq)]);
+  await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq), loadRuntimeOutputs(false, runtimeRequestSeq)]);
 }
 
 function selectPage(index: string) {
@@ -333,6 +342,16 @@ function selectRunEvent(event: DisplayRunEvent) {
 
 async function copyRuntimeCurl(curl: string) {
   await navigator.clipboard.writeText(curl);
+  ElMessage.success(t("message.curlCopied"));
+}
+
+async function copyRuntimeOutputValue(row: RuntimeOutputRow) {
+  await navigator.clipboard.writeText(runtimeOutputValueText(row.output));
+  ElMessage.success(t("message.outputCopied"));
+}
+
+async function copyRuntimeOutputCurl(row: RuntimeOutputRow) {
+  await navigator.clipboard.writeText(runtimeOutputCurl(row.name));
   ElMessage.success(t("message.curlCopied"));
 }
 
@@ -539,7 +558,7 @@ async function deleteResource(kind: ResourceKind, item: PublicProviderKey | Publ
 async function runtimeApiChanged() {
   closeRunEventsStream();
   resetRuntimePanels();
-  await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq)]);
+  await Promise.all([loadRuntimeHistory(false), loadRuntimeExamples(runtimeRequestSeq), loadRuntimeOutputs(false, runtimeRequestSeq)]);
 }
 
 async function loadRuntimeExamples(seq = runtimeRequestSeq) {
@@ -551,6 +570,22 @@ async function loadRuntimeExamples(seq = runtimeRequestSeq) {
   const result = await requestJson<RuntimeCallExample>(`/ui/deployments/${encodeURIComponent(api.id)}/examples`);
   if (isCurrentRuntimeRequest(seq, api)) {
     runtimeCallExample.value = result;
+  }
+}
+
+async function loadRuntimeOutputs(showMessage = true, seq = runtimeRequestSeq) {
+  const api = selectedRuntimeApi.value;
+  if (!api) {
+    runtimeOutputs.value = null;
+    return;
+  }
+  const result = await requestJson<RuntimeOutputListing>(`/ui/deployments/${encodeURIComponent(api.id)}/runtime-outputs`);
+  if (!isCurrentRuntimeRequest(seq, api)) {
+    return;
+  }
+  runtimeOutputs.value = result;
+  if (showMessage) {
+    ElMessage.success(t("message.outputRefreshed"));
   }
 }
 
@@ -729,6 +764,7 @@ async function finalizeRunStream(api: ApiPublication, runId: string, seq = runti
   runDetail.value = run;
   initShellLog.value = loadedInitShellLog;
   await loadRuns(api, false, seq);
+  await loadRuntimeOutputs(false, seq);
   ElMessage.success(t("message.runtimeFinished", { action: run.action, status: run.status }));
 }
 
@@ -756,6 +792,7 @@ function resetRuntimePanels() {
   runEvents.value = [];
   initShellLog.value = null;
   runtimeCallExample.value = null;
+  runtimeOutputs.value = null;
   selectedRunEventId.value = "";
   runtimeRunDialogVisible.value = false;
 }
@@ -767,6 +804,17 @@ function nextRuntimeRequestSeq() {
 
 function isCurrentRuntimeRequest(seq: number, api: ApiPublication) {
   return seq === runtimeRequestSeq && selectedRuntimeApi.value?.id === api.id;
+}
+
+function runtimeOutputValueText(output: RuntimeTerraformOutput) {
+  const value = "value" in output ? output.value : output;
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function runtimeOutputCurl(outputName: string) {
+  const api = requireRuntimeApi();
+  const path = `/api/runtime/${encodeURIComponent(api.id)}/outputs/${encodeURIComponent(outputName)}`;
+  return `curl "$BASE_URL${path}" -H "X-API-Key: $RUNTIME_OUTPUT_TOKEN"`;
 }
 
 function requireProvider(): ProviderType {
@@ -1041,6 +1089,23 @@ function t(key: TranslationKey, params?: TranslationParams) {
               <el-empty v-if="!runtimeCallExample?.deploy && !runtimeCallExample?.delete" :description="t('empty.examples')" :image-size="52" />
             </el-card>
             <div class="runtime-panels">
+              <el-card shadow="never">
+                <template #header>
+                  <div class="curl-example-header">
+                    <span>{{ t("panel.runtimeOutputs") }}</span>
+                    <el-button size="small" text type="primary" @click="loadRuntimeOutputs().catch(showError)">{{ t("action.refresh") }}</el-button>
+                  </div>
+                </template>
+                <el-alert v-if="runtimeOutputs?.error" class="form-tip" :title="runtimeOutputs.error" type="warning" :closable="false" />
+                <el-table v-if="runtimeOutputRows.length > 0" :data="runtimeOutputRows" stripe>
+                  <el-table-column :label="t('table.outputName')" min-width="180"><template #default="{ row }"><strong>{{ row.name }}</strong></template></el-table-column>
+                  <el-table-column :label="t('table.sensitive')" width="120"><template #default="{ row }"><el-tag :type="row.output.sensitive ? 'warning' : 'success'">{{ row.output.sensitive ? t("runtime.sensitive") : t("runtime.public") }}</el-tag></template></el-table-column>
+                  <el-table-column :label="t('table.value')" min-width="220"><template #default="{ row }"><pre class="output-value">{{ runtimeOutputValueText(row.output) }}</pre></template></el-table-column>
+                  <el-table-column :label="t('table.actions')" width="190" fixed="right"><template #default="{ row }"><el-button size="small" text type="primary" @click="copyRuntimeOutputValue(row).catch(showError)">{{ t("action.copyValue") }}</el-button><el-button size="small" text type="primary" @click="copyRuntimeOutputCurl(row).catch(showError)">{{ t("action.copyCurl") }}</el-button></template></el-table-column>
+                </el-table>
+                <el-empty v-else :description="t('empty.output')" :image-size="52" />
+                <p class="muted">{{ t("runtime.outputHint") }}</p>
+              </el-card>
               <el-card shadow="never">
                 <template #header>{{ t("panel.runHistory") }}</template>
                 <el-empty v-if="!runList || runList.length === 0" :description="t('empty.runList')" :image-size="52" />

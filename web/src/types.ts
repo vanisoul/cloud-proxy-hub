@@ -155,6 +155,18 @@ export type RuntimeCallExample = {
   delete?: RuntimeActionExample;
 };
 
+export type RuntimeOutputListing = {
+  apiId: string;
+  outputs: Record<string, RuntimeTerraformOutput>;
+  error?: string;
+};
+
+export type RuntimeTerraformOutput = {
+  sensitive?: boolean;
+  type?: unknown;
+  value?: unknown;
+};
+
 export type RuntimeActionExample = {
   method: "POST";
   path: string;
