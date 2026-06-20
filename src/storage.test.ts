@@ -79,7 +79,7 @@ describe("PlatformStore", () => {
     expect(await Bun.file(`${testRoot}/config/apis/aliyun-alicloud/${api.id}/metadata.json`).exists()).toBe(true);
   });
 
-  it("issues runtime output tokens without leaking token material", async () => {
+  it("stores API secrets without runtime output token material", async () => {
     await createConfigFixture();
 
     const api = await saveSafeApi();
@@ -87,13 +87,11 @@ describe("PlatformStore", () => {
     const metadata = await Bun.file(`${testRoot}/config/apis/aliyun-alicloud/safe-api/metadata.json`).json();
     const listed = await store.listApis();
 
-    expect(api.runtimeOutputToken).toStartWith("cph_rt_");
-    expect(secret.runtimeOutputTokenHash).toBeString();
-    expect(secret.runtimeOutputTokenHash).not.toBe(api.runtimeOutputToken);
-    expect(JSON.stringify(metadata)).not.toContain(api.runtimeOutputToken);
-    expect(JSON.stringify(metadata)).not.toContain(secret.runtimeOutputTokenHash);
-    expect(JSON.stringify(listed)).not.toContain(api.runtimeOutputToken);
-    expect(JSON.stringify(listed)).not.toContain(secret.runtimeOutputTokenHash);
+    expect(api).not.toHaveProperty("runtimeOutputToken");
+    expect(secret).not.toHaveProperty("runtimeOutputTokenHash");
+    expect(metadata).not.toHaveProperty("runtimeOutputToken");
+    expect(metadata).not.toHaveProperty("runtimeOutputTokenHash");
+    expect(JSON.stringify(listed)).not.toContain("runtimeOutputToken");
   });
 
   it("stores provider-scoped templates as metadata plus files", async () => {
@@ -1227,18 +1225,16 @@ describe("PlatformStore", () => {
     expect(outputs.plain_output.value).toBe("hello");
   });
 
-  it("serves runtime output snapshots with API-scoped token auth", async () => {
+  it("serves runtime output snapshots without storage-layer token auth", async () => {
     const terraform = await createRuntimeFixture();
-    const token = (await store.rotateRuntimeOutputToken("safe-api")).runtimeOutputToken;
     await terraform.deploy(await store.getApi("safe-api"), {
       vars: { token: "super-secret", name: "demo" },
     });
     await Bun.file(`${testRoot}/terraform-called.txt`).delete();
 
-    const plain = await store.getRuntimeOutput("safe-api", "plain_output", token);
-    const sensitive = await store.getRuntimeOutput("safe-api", "secret_output", token);
-    await expectRejects(store.getRuntimeOutput("safe-api", "plain_output", "wrong-token"), "Unauthorized");
-    await expectRejects(store.getRuntimeOutput("safe-api", "missing_output", token), "Output missing_output not found");
+    const plain = await store.getRuntimeOutput("safe-api", "plain_output");
+    const sensitive = await store.getRuntimeOutput("safe-api", "secret_output");
+    await expectRejects(store.getRuntimeOutput("safe-api", "missing_output"), "Output missing_output not found");
 
     expect(plain).toMatchObject({ apiId: "safe-api", outputName: "plain_output", value: "hello", sensitive: false });
     expect(sensitive).toMatchObject({ apiId: "safe-api", outputName: "secret_output", value: "[REDACTED]", sensitive: true });
@@ -1250,20 +1246,18 @@ describe("PlatformStore", () => {
 
   it("disables current runtime outputs after successful delete", async () => {
     const terraform = await createRuntimeFixture();
-    const token = (await store.rotateRuntimeOutputToken("safe-api")).runtimeOutputToken;
     const api = await store.getApi("safe-api");
     await terraform.deploy(api, { vars: { token: "super-secret", name: "demo" } });
     await terraform.delete(api, { vars: { token: "super-secret", name: "demo" } });
 
-    await expectRejects(store.getRuntimeOutput("safe-api", "plain_output", token), "Runtime output is unavailable after delete");
+    await expectRejects(store.getRuntimeOutput("safe-api", "plain_output"), "Runtime output is unavailable after delete");
   });
 
   it("does not serve stale runtime output when post-deploy output capture fails", async () => {
     const terraform = await createRuntimeFixture();
-    const token = (await store.rotateRuntimeOutputToken("safe-api")).runtimeOutputToken;
     const api = await store.getApi("safe-api");
     await terraform.deploy(api, { vars: { token: "super-secret", name: "demo" } });
-    expect(await store.getRuntimeOutput("safe-api", "plain_output", token)).toMatchObject({ value: "hello" });
+    expect(await store.getRuntimeOutput("safe-api", "plain_output")).toMatchObject({ value: "hello" });
 
     const terraformBin = Bun.env.TERRAFORM_BIN;
     expect(terraformBin).toBeString();
@@ -1283,7 +1277,7 @@ printf 'fake terraform %s ok\n' "\${1:-}"
     );
     await terraform.deploy(api, { vars: { token: "super-secret", name: "demo" } });
 
-    await expectRejects(store.getRuntimeOutput("safe-api", "plain_output", token), "Runtime output is not available");
+    await expectRejects(store.getRuntimeOutput("safe-api", "plain_output"), "Runtime output is not available");
   });
 
   it("returns a safe generic error when Terraform output fails", async () => {

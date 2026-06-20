@@ -85,7 +85,7 @@ const sampleTemplate = [
 const activePage = ref<PageKey>("dashboard");
 const loading = ref(false);
 const actionLoading = ref(false);
-const state = reactive<BootstrapResponse>({ providerTypes: [], keys: [], templates: [], shells: [], apis: [] });
+const state = reactive<BootstrapResponse>({ publicCallbackBaseUrl: "", providerTypes: [], keys: [], templates: [], shells: [], apis: [] });
 const selectedProviderId = ref("");
 const keyDialogVisible = ref(false);
 const templateDialogVisible = ref(false);
@@ -243,6 +243,7 @@ async function loadBootstrap() {
   loading.value = true;
   try {
     const data = await requestJson<BootstrapResponse>("/ui/bootstrap");
+    state.publicCallbackBaseUrl = data.publicCallbackBaseUrl;
     state.providerTypes = data.providerTypes;
     state.keys = data.keys;
     state.templates = data.templates;
@@ -814,7 +815,7 @@ function runtimeOutputValueText(output: RuntimeTerraformOutput) {
 function runtimeOutputCurl(outputName: string) {
   const api = requireRuntimeApi();
   const path = `/api/runtime/${encodeURIComponent(api.id)}/outputs/${encodeURIComponent(outputName)}`;
-  return `curl "$BASE_URL${path}" -H "X-API-Key: $RUNTIME_OUTPUT_TOKEN"`;
+  return `curl "${state.publicCallbackBaseUrl}${path}" -H "Authorization: Bearer $ADMIN_API_KEY"`;
 }
 
 function requireProvider(): ProviderType {

@@ -183,6 +183,7 @@ export type InitShellLogResponse = {
 };
 
 export type BootstrapResponse = {
+  publicCallbackBaseUrl: string;
   providerTypes: ProviderType[];
   keys: PublicProviderKey[];
   templates: PublicTerraformTemplate[];

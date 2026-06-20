@@ -9,6 +9,6 @@ data:
   CONFIG_DIR: "/app/config"
   DATA_DIR: "/app/data"
   TERRAFORM_BIN: "terraform"
-  # Set this to the public HTTPS origin only when deployed VMs must post init-shell logs back.
+  # Public HTTPS origin for init-shell callbacks and runtime output curl examples.
   # Example: https://terraform-platform.example.com
   PUBLIC_CALLBACK_BASE_URL: ""
