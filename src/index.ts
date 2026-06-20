@@ -422,9 +422,9 @@ const app = new Elysia()
   })
   .get(
     "/api/runtime/:apiId/outputs/:outputName",
-    async ({ headers, params, set }) => {
+    async ({ headers, params, query, set }) => {
       try {
-        if (!(await constantTimeEqualText(runtimeOutputCredential(headers), appConfig.apiKey))) {
+        if (!(await constantTimeEqualText(runtimeOutputCredential(headers, query), appConfig.apiKey))) {
           throw new Error("Unauthorized");
         }
         const output = await store.getRuntimeOutput(params.apiId, params.outputName);
@@ -435,7 +435,10 @@ const app = new Elysia()
         return { error: runtimeOutputErrorCode(message), message: runtimeOutputMessage(message) };
       }
     },
-    { params: t.Object({ apiId: idSchema, outputName: t.String({ minLength: 1 }) }) },
+    {
+      params: t.Object({ apiId: idSchema, outputName: t.String({ minLength: 1 }) }),
+      query: t.Object({ apiKey: t.Optional(t.String()) }),
+    },
   )
   .delete(
     "/api/apis/:apiId",
@@ -797,9 +800,9 @@ function getCookieValue(cookieHeader: string | null, cookieName: string) {
   return "";
 }
 
-function runtimeOutputCredential(headers: Record<string, string | undefined>) {
+function runtimeOutputCredential(headers: Record<string, string | undefined>, query: Record<string, string | undefined>) {
   const bearer = headers.authorization?.replace(/^Bearer\s+/i, "");
-  return headers["x-api-key"] ?? bearer ?? "";
+  return headers["x-api-key"] ?? bearer ?? query.apiKey ?? "";
 }
 
 function runtimeOutputValueResponse(value: unknown) {

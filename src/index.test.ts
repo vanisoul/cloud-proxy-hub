@@ -374,8 +374,10 @@ ${await Bun.file("web/src/App.vue").text()}`;
     const bearerResponse = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
       headers: { authorization: "Bearer test-admin-key" },
     });
+    const queryResponse = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output?apiKey=test-admin-key`);
     const body = await response.text();
     const bearerBody = await bearerResponse.text();
+    const queryBody = await queryResponse.text();
     const objectBody = await objectResponse.json();
 
     expect(uiOutputs.status).toBe(200);
@@ -386,9 +388,11 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(oldRuntimeToken.status).toBe(401);
     expect(response.status).toBe(200);
     expect(bearerResponse.status).toBe(200);
+    expect(queryResponse.status).toBe(200);
     expect(objectResponse.status).toBe(200);
     expect(body).toBe("hello");
     expect(bearerBody).toBe("hello");
+    expect(queryBody).toBe("hello");
     expect(objectBody).toEqual({ host: "example.com", port: 443 });
     expect(body).not.toContain("apiId");
     expect(body).not.toContain("outputName");
