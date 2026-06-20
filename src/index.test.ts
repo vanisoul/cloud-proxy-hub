@@ -367,12 +367,16 @@ ${await Bun.file("web/src/App.vue").text()}`;
     const response = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
       headers: { "x-api-key": "test-admin-key" },
     });
+    const objectResponse = await fetch(`${server.origin}/api/runtime/safe-api/outputs/object_output`, {
+      headers: { "x-api-key": "test-admin-key" },
+    });
     const uiOutputsBody = await uiOutputs.json();
     const bearerResponse = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
       headers: { authorization: "Bearer test-admin-key" },
     });
-    const body = await response.json();
-    const bearerBody = await bearerResponse.json();
+    const body = await response.text();
+    const bearerBody = await bearerResponse.text();
+    const objectBody = await objectResponse.json();
 
     expect(uiOutputs.status).toBe(200);
     expect(uiOutputsBody.outputs.plain_output.value).toBe("hello");
@@ -382,14 +386,19 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(oldRuntimeToken.status).toBe(401);
     expect(response.status).toBe(200);
     expect(bearerResponse.status).toBe(200);
-    expect(body).toMatchObject({ apiId: "safe-api", outputName: "plain_output", value: "hello", sensitive: false });
-    expect(bearerBody).toMatchObject({ apiId: "safe-api", outputName: "plain_output", value: "hello", sensitive: false });
-    expect(Object.keys(body).sort()).toEqual(["apiId", "outputName", "sensitive", "value"]);
-    expect(JSON.stringify(body)).not.toContain("latestRun");
-    expect(JSON.stringify(body)).not.toContain("run-1");
-    expect(JSON.stringify(body)).not.toContain("revision-1");
-    expect(JSON.stringify(body)).not.toContain("key-1");
-    expect(JSON.stringify(body)).not.toContain("super-secret");
+    expect(objectResponse.status).toBe(200);
+    expect(body).toBe("hello");
+    expect(bearerBody).toBe("hello");
+    expect(objectBody).toEqual({ host: "example.com", port: 443 });
+    expect(body).not.toContain("apiId");
+    expect(body).not.toContain("outputName");
+    expect(body).not.toContain("sensitive");
+    expect(body).not.toContain("value");
+    expect(body).not.toContain("latestRun");
+    expect(body).not.toContain("run-1");
+    expect(body).not.toContain("revision-1");
+    expect(body).not.toContain("key-1");
+    expect(body).not.toContain("super-secret");
   });
 
   it("uses the admin token consistently for API and runtime routes", async () => {
@@ -1093,6 +1102,7 @@ async function seedRuntimeFixture(testRoot: string) {
     capturedAt: "2026-01-01T00:00:00.000Z",
     outputs: {
       plain_output: { sensitive: false, type: "string", value: "hello" },
+      object_output: { sensitive: false, type: ["object", { host: "string", port: "number" }], value: { host: "example.com", port: 443 } },
       secret_output: { sensitive: true, type: "string", value: "[REDACTED]" },
     },
   }));
