@@ -254,6 +254,16 @@ body {
   max-height: 180px;
 }
 
+.output-value {
+  max-height: 96px;
+  overflow: auto;
+  margin: 0;
+  color: var(--color-ink-strong);
+  font-family: var(--font-code);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 .form-tip {
   margin: 0 0 var(--space-5);
 }

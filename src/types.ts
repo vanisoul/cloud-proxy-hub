@@ -80,6 +80,8 @@ export type ApiPublication = {
   allowedActions: DeploymentAction[];
   revisionId: string;
   snapshot: ApiPublicationSnapshot;
+  runtimeOutputTokenCreatedAt?: string;
+  runtimeOutputToken?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -188,4 +190,19 @@ export type RuntimeActionExample = {
   path: string;
   body: { vars?: Record<string, string> };
   curl: string;
+};
+
+export type TerraformOutputSnapshot = {
+  apiId: string;
+  runId: string;
+  revisionId: string;
+  capturedAt: string;
+  outputs: Record<string, unknown>;
+};
+
+export type RuntimeOutputResponse = {
+  apiId: string;
+  outputName: string;
+  value: unknown;
+  sensitive: boolean;
 };

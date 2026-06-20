@@ -183,6 +183,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).toContain('const runList = ref<TerraformRun[] | null>(null);');
     expect(app).toContain('const runEvents = ref<TerraformRunEvent[]>([]);');
     expect(app).toContain('const runtimeCallExample = ref<RuntimeCallExample | null>(null);');
+    expect(app).toContain('const runtimeOutputs = ref<RuntimeOutputListing | null>(null);');
     expect(app).toContain('const runtimeRunDialogVisible = ref(false);');
     expect(app).toContain('type DisplayRunEvent = TerraformRunEvent & { groupedEventIds: string[] };');
     expect(app).toContain('const selectedRunEventId = ref("");');
@@ -200,6 +201,7 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).toContain('function isCurrentRuntimeRequest(seq: number, api: ApiPublication)');
     expect(app).toContain('if (!isCurrentRuntimeRequest(seq, api))');
     expect(app).toContain('const runtimeHistoryItems = computed(() => runList.value ?? []);');
+    expect(app).toContain('const runtimeOutputRows = computed<RuntimeOutputRow[]>(() =>');
     expect(app).toContain('<el-timeline v-else class="history-timeline">');
     expect(app).toContain('v-for="run in runtimeHistoryItems"');
     expect(app).toContain('@click="viewRun(run.id)"');
@@ -216,6 +218,11 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).toContain('openRunEventsStream(api, runId, seq);');
     expect(app).toContain('async function loadRuntimeExamples(seq = runtimeRequestSeq)');
     expect(app).toContain('requestJson<RuntimeCallExample>(`/ui/deployments/${encodeURIComponent(api.id)}/examples`)');
+    expect(app).toContain('async function loadRuntimeOutputs(showMessage = true, seq = runtimeRequestSeq)');
+    expect(app).toContain('requestJson<RuntimeOutputListing>(`/ui/deployments/${encodeURIComponent(api.id)}/runtime-outputs`)');
+    expect(app).toContain('copyRuntimeOutputValue(row).catch(showError)');
+    expect(app).toContain('copyRuntimeOutputCurl(row).catch(showError)');
+    expect(app).toContain('return `curl "$BASE_URL${path}" -H "X-API-Key: $RUNTIME_OUTPUT_TOKEN"`;');
     expect(app).toContain('copyRuntimeCurl(runtimeCallExample.deploy.curl).catch(showError)');
     expect(app).toContain('copyRuntimeCurl(runtimeCallExample.delete.curl).catch(showError)');
     expect(app).toContain('{{ runtimeCallExample.deploy.curl }}');
@@ -238,11 +245,14 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(app).not.toContain('runIdInput');
     expect(app).not.toContain('panel.latestRun');
     expect(app).toContain('panel.externalExamples');
+    expect(app).toContain('t("panel.runtimeOutputs")');
+    expect(app).toContain('t("runtime.outputHint")');
     expect(app).not.toContain('panel.status');
     expect(app).not.toContain('panel.output');
     expect(app).not.toContain('formatJson');
     expect(app).not.toContain('<el-card shadow="never">\n                <template #header>{{ t("panel.runDetail") }}</template>');
     expect(server).toContain('"/ui/deployments/:apiId/deploy/start"');
+    expect(server).toContain('"/ui/deployments/:apiId/runtime-outputs"');
     expect(server).toContain('"/ui/deployments/:apiId/delete/start"');
     expect(server).toContain('"/ui/deployments/:apiId/examples"');
     expect(server).toContain('"/ui/deployments/:apiId/runs/:runId/events"');
@@ -338,6 +348,86 @@ ${await Bun.file("web/src/App.vue").text()}`;
     expect(uiBootstrap.status).toBe(200);
     void crossOriginMutation;
     // expect(crossOriginMutation.status).toBe(403);
+  });
+
+  it("serves runtime output through X-API-Key without exposing admin fields", async () => {
+    const server = await startTestServer();
+
+    const uiOutputs = await fetch(`${server.origin}/ui/deployments/safe-api/runtime-outputs`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const missingToken = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`);
+    const wrongToken = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
+      headers: { "x-api-key": "wrong-token" },
+    });
+    const response = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
+      headers: { "x-api-key": "test-runtime-token" },
+    });
+    const uiOutputsBody = await uiOutputs.json();
+    const bearerResponse = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
+      headers: { authorization: "Bearer test-runtime-token" },
+    });
+    const body = await response.json();
+    const bearerBody = await bearerResponse.json();
+
+    expect(uiOutputs.status).toBe(200);
+    expect(uiOutputsBody.outputs.plain_output.value).toBe("hello");
+    expect(uiOutputsBody.outputs.secret_output.value).toBe("[REDACTED]");
+    expect(missingToken.status).toBe(401);
+    expect(wrongToken.status).toBe(401);
+    expect(response.status).toBe(200);
+    expect(bearerResponse.status).toBe(200);
+    expect(body).toMatchObject({ apiId: "safe-api", outputName: "plain_output", value: "hello", sensitive: false });
+    expect(bearerBody).toMatchObject({ apiId: "safe-api", outputName: "plain_output", value: "hello", sensitive: false });
+    expect(Object.keys(body).sort()).toEqual(["apiId", "outputName", "sensitive", "value"]);
+    expect(JSON.stringify(body)).not.toContain("latestRun");
+    expect(JSON.stringify(body)).not.toContain("run-1");
+    expect(JSON.stringify(body)).not.toContain("revision-1");
+    expect(JSON.stringify(body)).not.toContain("key-1");
+    expect(JSON.stringify(body)).not.toContain("super-secret");
+  });
+
+  it("keeps admin API auth separate from runtime X-API-Key", async () => {
+    const server = await startTestServer();
+
+    const adminRouteWithRuntimeKey = await fetch(`${server.origin}/api/provider-types`, {
+      headers: { "x-api-key": "test-runtime-token" },
+    });
+    const runtimeRouteWithAdminKey = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const missingRuntimeApi = await fetch(`${server.origin}/api/runtime/missing-api/outputs/plain_output`, {
+      headers: { "x-api-key": "test-runtime-token" },
+    });
+    const missingRuntimeApiBody = await missingRuntimeApi.json();
+
+    expect(adminRouteWithRuntimeKey.status).toBe(401);
+    expect(runtimeRouteWithAdminKey.status).toBe(401);
+    expect(missingRuntimeApi.status).toBe(401);
+    expect(missingRuntimeApiBody).toEqual({ error: "unauthorized", message: "Unauthorized" });
+  });
+
+  it("rotates runtime output tokens through an admin-only non-GET route", async () => {
+    const server = await startTestServer();
+
+    const unauthorized = await fetch(`${server.origin}/api/apis/safe-api/runtime-output-token`, { method: "POST" });
+    const response = await fetch(`${server.origin}/api/apis/safe-api/runtime-output-token`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-admin-key" },
+    });
+    const body = await response.json();
+    const oldToken = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
+      headers: { "x-api-key": "test-runtime-token" },
+    });
+    const newToken = await fetch(`${server.origin}/api/runtime/safe-api/outputs/plain_output`, {
+      headers: { "x-api-key": body.runtimeOutputToken },
+    });
+
+    expect(unauthorized.status).toBe(401);
+    expect(response.status).toBe(200);
+    expect(body.runtimeOutputToken).toStartWith("cph_rt_");
+    expect(oldToken.status).toBe(401);
+    expect(newToken.status).toBe(200);
   });
 
   it("redacts legacy sensitive template defaults from UI and API template routes", async () => {
@@ -994,6 +1084,21 @@ async function seedRuntimeFixture(testRoot: string) {
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
   await Bun.write(`${testRoot}/config/apis/aliyun-alicloud/safe-api/metadata.json`, JSON.stringify(apiMetadata));
+  const runtimeOutputTokenHash = await sha256Hex("test-runtime-token");
+  await Bun.write(`${testRoot}/config/apis/aliyun-alicloud/safe-api/secret.json`, JSON.stringify({
+    vars: { name: "demo", token: "super-secret" },
+    runtimeOutputTokenHash,
+  }));
+  await Bun.write(`${testRoot}/data/apis/safe-api/current-output.redacted.json`, JSON.stringify({
+    apiId: "safe-api",
+    runId: "run-1",
+    revisionId: "revision-1",
+    capturedAt: "2026-01-01T00:00:00.000Z",
+    outputs: {
+      plain_output: { sensitive: false, type: "string", value: "hello" },
+      secret_output: { sensitive: true, type: "string", value: "[REDACTED]" },
+    },
+  }));
   await Bun.write(`${testRoot}/config/apis/aliyun-alicloud/no-shell-api/metadata.json`, JSON.stringify({
     ...apiMetadata,
     id: "no-shell-api",
@@ -1112,6 +1217,11 @@ function base64UrlEncode(value: string | Uint8Array) {
     binary += String.fromCharCode(byte);
   }
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+async function sha256Hex(value: string) {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function login(origin: string) {
