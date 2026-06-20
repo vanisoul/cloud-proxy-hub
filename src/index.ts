@@ -118,7 +118,7 @@ const app = new Elysia()
     }
 
     logger.error("請求處理失敗", { code, error: message });
-    set.status = isNotFoundError(message) ? 404 : isClientInputError(message) ? 400 : 500;
+    set.status = code === "NOT_FOUND" || isNotFoundError(message) ? 404 : isClientInputError(message) ? 400 : 500;
     return { error: message };
   })
   .get("/", () => serveSpaIndex(), { detail: { summary: "Admin UI" } })
@@ -158,6 +158,7 @@ const app = new Elysia()
   )
   .get("/health", () => ({ ok: true, service: "terraform-platform" }))
   .get("/ui/bootstrap", async () => ({
+    publicCallbackBaseUrl: appConfig.publicCallbackBaseUrl,
     providerTypes: await store.listProviderTypes(),
     keys: await store.listKeys(),
     templates: await store.listTemplates(),
@@ -419,14 +420,14 @@ const app = new Elysia()
   .get("/api/apis/:apiId", async ({ params }) => store.getApi(params.apiId), {
     params: t.Object({ apiId: idSchema }),
   })
-  .post("/api/apis/:apiId/runtime-output-token", async ({ params }) => store.rotateRuntimeOutputToken(params.apiId), {
-    params: t.Object({ apiId: idSchema }),
-  })
   .get(
     "/api/runtime/:apiId/outputs/:outputName",
     async ({ headers, params, set }) => {
       try {
-        return await store.getRuntimeOutput(params.apiId, params.outputName, runtimeOutputToken(headers));
+        if (!(await constantTimeEqualText(runtimeOutputCredential(headers), appConfig.apiKey))) {
+          throw new Error("Unauthorized");
+        }
+        return await store.getRuntimeOutput(params.apiId, params.outputName);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         set.status = runtimeOutputStatus(message);
@@ -795,7 +796,7 @@ function getCookieValue(cookieHeader: string | null, cookieName: string) {
   return "";
 }
 
-function runtimeOutputToken(headers: Record<string, string | undefined>) {
+function runtimeOutputCredential(headers: Record<string, string | undefined>) {
   const bearer = headers.authorization?.replace(/^Bearer\s+/i, "");
   return headers["x-api-key"] ?? bearer ?? "";
 }

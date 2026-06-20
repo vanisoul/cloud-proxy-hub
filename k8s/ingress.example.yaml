@@ -5,7 +5,8 @@ metadata:
   labels:
     app.kubernetes.io/name: terraform-platform
   annotations:
-    # Public path requirements: /callbacks/init-shell/* for VM callbacks and /api/runtime/* for token-protected consumer output reads.
+    # Public path requirements: /callbacks/init-shell/* for VM callbacks and /api/runtime/* for ADMIN_API_KEY-protected consumer output reads.
+    # Exposing /api/runtime/* shares the admin-token blast radius with runtime output consumers.
     # Security-first default: keep admin UI/API paths (/, /login, /assets/*, /ui/*, /api/* except /api/runtime/*) private or internal-only.
     # Never expose filesystem paths such as /app/config, /app/data, /config, or /data.
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"

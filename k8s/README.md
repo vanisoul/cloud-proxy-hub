@@ -37,7 +37,7 @@ kubectl -n terraform-platform create secret generic terraform-platform-secret \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-If init-shell callbacks are needed, set `PUBLIC_CALLBACK_BASE_URL` in `k8s/configmap.yaml` to the public HTTPS origin reachable by deployed VMs:
+If init-shell callbacks or public runtime output curl examples are needed, set `PUBLIC_CALLBACK_BASE_URL` in `k8s/configmap.yaml` to the public HTTPS origin reachable by deployed VMs or consumers:
 
 ```yaml
 PUBLIC_CALLBACK_BASE_URL: "https://terraform-platform.example.com"
@@ -65,12 +65,12 @@ kubectl apply --dry-run=server -k k8s
 
 ## Network Exposure
 
-Security-first default: keep the admin service private. Expose only the callback path when init-shell logs are enabled and the runtime output path when consumers need deployed output values.
+Security-first default: keep the admin service private. Expose only the callback path when init-shell logs are enabled and the runtime output path when consumers need deployed output values and can safely use `ADMIN_API_KEY`.
 
 Public paths:
 
 - `/callbacks/init-shell/*`: signed one-time callback endpoint for VM init-shell logs. This must be reachable from deployed VMs when `PUBLIC_CALLBACK_BASE_URL` is configured.
-- `/api/runtime/*`: consumer runtime output endpoint protected by the per-API runtime output token in `X-API-Key` or `Authorization: Bearer`. Expose only when consumers need direct output reads.
+- `/api/runtime/*`: consumer runtime output endpoint protected by `ADMIN_API_KEY` in `X-API-Key` or `Authorization: Bearer`. Expose only when consumers need direct output reads and after reviewing the larger blast radius of sharing the admin token.
 
 Internal-only paths by default:
 

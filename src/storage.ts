@@ -28,7 +28,7 @@ type ApiInput = Omit<ApiPublication, "createdAt" | "updatedAt" | "id" | "revisio
   id?: string;
   vars?: Record<string, string>;
 };
-type ApiSecret = { vars: Record<string, string>; runtimeOutputTokenHash?: string };
+type ApiSecret = { vars: Record<string, string> };
 type RuntimeOutputDisabled = { apiId: string; runId: string; disabledAt: string; reason: "delete" | "output_failed" };
 type RunEventInput = Omit<TerraformRunEvent, "id" | "apiId" | "runId" | "createdAt">;
 
@@ -239,9 +239,6 @@ export class PlatformStore {
       throw new Error(`Missing API variables: ${missing.map((variable) => variable.name).join(", ")}`);
     }
     const revisionId = uuidV7();
-    const runtimeOutputToken = existingSecret?.runtimeOutputTokenHash ? undefined : generateRuntimeOutputToken();
-    const runtimeOutputTokenHash = existingSecret?.runtimeOutputTokenHash ?? await sha256Hex(runtimeOutputToken ?? "");
-    const runtimeOutputTokenCreatedAt = existing?.runtimeOutputTokenCreatedAt ?? now;
     const api: ApiPublication = {
       ...input,
       shellId: input.shellBinding?.shellId,
@@ -249,35 +246,16 @@ export class PlatformStore {
       id,
       revisionId,
       snapshot: toApiSnapshot(key, template, shell, input.shellBinding),
-      runtimeOutputToken,
-      runtimeOutputTokenCreatedAt,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
     const apiDir = this.apiPath(api.providerTypeId, api.id);
     await mkdir(apiDir, { recursive: true });
-    const { runtimeOutputToken: _runtimeOutputToken, ...metadata } = api;
-    await this.writeJson(join(apiDir, "metadata.json"), metadata);
-    await this.writeJson(join(apiDir, "secret.json"), { vars, runtimeOutputTokenHash });
+    await this.writeJson(join(apiDir, "metadata.json"), api);
+    await this.writeJson(join(apiDir, "secret.json"), { vars });
     await this.writeJson(join(apiDir, "revisions", revisionId, "secret.json"), { vars });
     await mkdir(this.apiDataPath(api.id, "runs"), { recursive: true });
     return api;
-  }
-
-  async rotateRuntimeOutputToken(apiId: string) {
-    const api = await this.getApi(apiId);
-    const secret = await this.maybeReadJson<ApiSecret>(this.apiPath(api.providerTypeId, api.id, "secret.json"));
-    const runtimeOutputToken = generateRuntimeOutputToken();
-    const runtimeOutputTokenCreatedAt = new Date().toISOString();
-    await this.writeJson(this.apiPath(api.providerTypeId, api.id, "secret.json"), {
-      vars: secret?.vars ?? {},
-      runtimeOutputTokenHash: await sha256Hex(runtimeOutputToken),
-    });
-    await this.writeJson(this.apiPath(api.providerTypeId, api.id, "metadata.json"), {
-      ...api,
-      runtimeOutputTokenCreatedAt,
-    });
-    return { apiId: api.id, runtimeOutputToken, runtimeOutputTokenCreatedAt };
   }
 
   async getApiVars(api: ApiPublication) {
@@ -303,12 +281,8 @@ export class PlatformStore {
     });
   }
 
-  async getRuntimeOutput(apiId: string, outputName: string, token: string): Promise<RuntimeOutputResponse> {
+  async getRuntimeOutput(apiId: string, outputName: string): Promise<RuntimeOutputResponse> {
     const api = await this.getApi(apiId);
-    const secret = await this.maybeReadJson<ApiSecret>(this.apiPath(api.providerTypeId, api.id, "secret.json"));
-    if (!secret?.runtimeOutputTokenHash || !(await constantTimeEqualText(await sha256Hex(token), secret.runtimeOutputTokenHash))) {
-      throw new Error("Unauthorized");
-    }
     const disabled = await this.maybeReadJson<RuntimeOutputDisabled>(this.apiDataPath(api.id, "current-output.disabled.json"));
     if (disabled) {
       throw new Error(disabled.reason === "delete" ? "Runtime output is unavailable after delete" : "Runtime output is not available");
@@ -649,7 +623,11 @@ function normalizeApiPublication(api: ApiPublication): ApiPublication {
 }
 
 function redactApiPublicationVars(api: ApiPublication): ApiPublication {
-  const { runtimeOutputToken: _runtimeOutputToken, ...safeApi } = api;
+  const {
+    runtimeOutputToken: _runtimeOutputToken,
+    runtimeOutputTokenCreatedAt: _runtimeOutputTokenCreatedAt,
+    ...safeApi
+  } = api as ApiPublication & { runtimeOutputToken?: string; runtimeOutputTokenCreatedAt?: string };
   return {
     ...safeApi,
     vars: redactVarsByVariables(safeApi.snapshot.template.variables, safeApi.vars ?? {}),
@@ -661,31 +639,6 @@ function redactApiPublicationVars(api: ApiPublication): ApiPublication {
       },
     },
   };
-}
-
-function generateRuntimeOutputToken() {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  return `cph_rt_${bytesToBase64Url(bytes)}`;
-}
-
-async function sha256Hex(value: string) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function constantTimeEqualText(left: string, right: string) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  let mismatch = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
-  }
-  return mismatch === 0;
-}
-
-function bytesToBase64Url(bytes: Uint8Array) {
-  return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
 function isTerraformOutputObject(value: unknown): value is { sensitive?: boolean; value?: unknown; [key: string]: unknown } {

@@ -80,8 +80,6 @@ export type ApiPublication = {
   allowedActions: DeploymentAction[];
   revisionId: string;
   snapshot: ApiPublicationSnapshot;
-  runtimeOutputTokenCreatedAt?: string;
-  runtimeOutputToken?: string;
   createdAt: string;
   updatedAt: string;
 };
